@@ -103,6 +103,7 @@ export interface UsageLike {
   cacheWrite: number
   cacheRead: number
   usd: number | null
+  calls?: number
 }
 export function usageTotals(entries: UsageLike[]): {
   usd: number

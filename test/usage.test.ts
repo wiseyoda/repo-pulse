@@ -356,3 +356,41 @@ describe('UsageStore persistence', () => {
     expect(b.entries.size).toBe(1)
   })
 })
+
+describe('antigravityEntries', () => {
+  it('turns conversations in the repo workspace into unpriced session entries with step counts', async () => {
+    const { antigravityEntries } = await import('../src/usage.ts')
+    const rows = [
+      {
+        conversation_id: 'c1',
+        step_count: 130,
+        last_modified_time: '2026-09-20 06:49:15.0436+00:00',
+        workspace_uris: '["file:///Users/me/dev/app"]',
+        app_data_dir: 'antigravity-cli',
+      },
+      {
+        conversation_id: 'c2',
+        step_count: 5,
+        last_modified_time: '2026-09-20 04:53:34+00:00',
+        workspace_uris: '["file:///Users/me/dev/other"]',
+        app_data_dir: 'antigravity-cli',
+      },
+      {
+        conversation_id: 'c3',
+        step_count: 1,
+        last_modified_time: '0001-01-01 00:00:00+00:00',
+        workspace_uris: '["file:///Users/me/dev/app"]',
+        app_data_dir: 'antigravity-cli',
+      },
+    ]
+    const out = antigravityEntries(rows, 'gemini/antigravity-cli', [ROOT])
+    expect(out.map((e) => e.key)).toEqual(['a:c1'])
+    expect(out[0]).toMatchObject({
+      tool: 'antigravity',
+      calls: 130,
+      cwd: ROOT,
+      input: 0,
+      output: 0,
+    })
+  })
+})

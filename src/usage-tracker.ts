@@ -18,6 +18,12 @@ import {
 import path from 'node:path'
 
 const SCAN_EVERY_MS = 2 * 60_000
+const DEFAULT_SOURCES: Record<Tool, boolean> = {
+  claude: true,
+  codex: true,
+  grok: true,
+  antigravity: true,
+}
 
 export interface UsageStatus {
   enabled: boolean
@@ -77,6 +83,8 @@ export class UsageTracker {
     const repo = (remote && repoNameFromRemote(remote)) || path.basename(root)
     const t = new UsageTracker(repo, remote, worktreeRoots, onChange)
     t.cfg = await readConfig(repo)
+    // Sources added after the config was written default to on.
+    if (t.cfg) t.cfg = { ...t.cfg, sources: { ...DEFAULT_SOURCES, ...t.cfg.sources } }
     if (t.cfg?.enabled) await t.start()
     return t
   }
@@ -92,7 +100,13 @@ export class UsageTracker {
       repo: this.repo,
       remote: this.remote,
       roots,
-      sources: this.cfg?.sources ?? { claude: true, codex: true, grok: true },
+      sources: {
+        claude: true,
+        codex: true,
+        grok: true,
+        antigravity: true,
+        ...(this.cfg?.sources ?? {}),
+      },
       createdAt: this.cfg?.createdAt ?? Date.now(),
     }
     await writeConfig(this.cfg)
@@ -163,7 +177,13 @@ export class UsageTracker {
       for (const e of this.store.entries.values())
         if (e.cost === undefined && !this.book.find(e.model)) unpriced.add(e.model)
     }
-    const enabledSources = this.cfg?.sources ?? { claude: true, codex: true, grok: true }
+    const enabledSources = {
+      claude: true,
+      codex: true,
+      grok: true,
+      antigravity: true,
+      ...(this.cfg?.sources ?? {}),
+    }
     const found = this.sources.length ? this.sources : []
     return {
       enabled: this.enabled,

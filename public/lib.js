@@ -296,7 +296,7 @@ export function usageTotals(entries) {
     sessions: new Set(),
   }
   for (const e of entries) {
-    t.n++
+    t.n += e.calls ?? 1
     t.input += e.input
     t.output += e.output
     t.cacheWrite += e.cacheWrite
@@ -324,7 +324,7 @@ export function groupUsage(entries, keyOf) {
       unpriced: 0,
       sessions: new Set(),
     }
-    g.n++
+    g.n += e.calls ?? 1
     g.tokens += USAGE_TOKENS(e)
     g.output += e.output
     if (e.usd === null || e.usd === undefined) g.unpriced++
@@ -401,7 +401,7 @@ export function usageSessions(entries) {
     s.tokens += USAGE_TOKENS(e)
     s.output += e.output
     s.usd += e.usd ?? 0
-    s.n++
+    s.n += e.calls ?? 1
     m.set(k, s)
   }
   return [...m.values()]

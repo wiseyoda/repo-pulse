@@ -17,8 +17,10 @@ import {
 import os from 'node:os'
 import path from 'node:path'
 
-export type Tool = 'claude' | 'codex' | 'grok'
-export const TOOLS: Tool[] = ['claude', 'codex', 'grok']
+export type Tool = 'claude' | 'codex' | 'grok' | 'antigravity'
+export const TOOLS: Tool[] = ['claude', 'codex', 'grok', 'antigravity']
+/** Bump when cursor semantics change so cached skip decisions are re-made. */
+export const CURSOR_VERSION = 2
 
 export interface UsageEntry {
   /** Stable identity so a re-read replaces rather than double counts. */
@@ -39,6 +41,8 @@ export interface UsageEntry {
   side: boolean
   /** Cost the tool itself reported in USD, when it does (Grok). */
   cost?: number
+  /** Model calls this entry stands for when it is a session roll-up (Grok, Antigravity). */
+  calls?: number
 }
 
 export interface UsageConfig {
@@ -103,6 +107,13 @@ export async function discoverSources(home = os.homedir()): Promise<Source[]> {
       out.push({ tool: 'codex', seat: name.slice(1), dir: path.join(dir, 'sessions') })
     } else if (/^\.grok(-[\w.-]+)?$/.test(name) && existsSync(path.join(dir, 'sessions'))) {
       out.push({ tool: 'grok', seat: name.slice(1), dir: path.join(dir, 'sessions') })
+    }
+    if (/^\.gemini(-[\w.-]+)?$/.test(name)) {
+      for (const sub of ['antigravity', 'antigravity-cli', 'antigravity-ide']) {
+        const db = path.join(dir, sub, 'conversation_summaries.db')
+        if (existsSync(db))
+          out.push({ tool: 'antigravity', seat: `${name.slice(1)}/${sub}`, dir: db })
+      }
     }
   }
   return out
@@ -357,8 +368,60 @@ export function parseGrokUpdates(text: string, ctx: GrokCtx): UsageEntry[] {
     cacheWrite: n(u.cacheCreationTokens),
     output: n(u.outputTokens),
     side: false,
+    ...(typeof u.modelCalls === 'number' ? { calls: u.modelCalls } : {}),
     ...(typeof u.costUsdTicks === 'number' ? { cost: u.costUsdTicks / 1e10 } : {}),
   }))
+}
+
+export interface AntigravityRow {
+  conversation_id: string
+  step_count: number
+  last_modified_time: string
+  workspace_uris: string
+  app_data_dir: string
+}
+
+/**
+ * Antigravity keeps conversation summaries (workspace, steps, times) in SQLite but no token
+ * counts, so each conversation becomes a zero-token entry that still carries sessions and
+ * activity. Its cost stays unpriced rather than guessed.
+ */
+export function antigravityEntries(
+  rows: AntigravityRow[],
+  seat: string,
+  roots: string[],
+): UsageEntry[] {
+  const out: UsageEntry[] = []
+  for (const r of rows) {
+    let uris: string[] = []
+    try {
+      uris = JSON.parse(r.workspace_uris || '[]')
+    } catch {}
+    const cwd = uris
+      .map((u) => (u.startsWith('file://') ? decodeURIComponent(u.slice(7)) : u))
+      .find((p) => underRoots(p, roots))
+    if (!cwd) continue
+    // SQLite's "YYYY-MM-DD HH:MM:SS" needs the T, or V8's legacy parser reads year 0001 as 2001.
+    const ts = Date.parse(String(r.last_modified_time).replace(' ', 'T'))
+    if (!Number.isFinite(ts) || ts < Date.UTC(2000, 0, 1)) continue
+    out.push({
+      key: `a:${r.conversation_id}`,
+      tool: 'antigravity',
+      seat,
+      session: r.conversation_id,
+      ts,
+      model: 'antigravity',
+      cwd,
+      branch: null,
+      input: 0,
+      output: 0,
+      cacheWrite: 0,
+      cacheRead: 0,
+      side: false,
+      calls: Math.max(0, r.step_count | 0),
+    })
+  }
+  return out
 }
 
 // --- store -----------------------------------------------------------------------------
@@ -389,7 +452,8 @@ export class UsageStore {
       this.appended = raw.split('\n').length
     } catch {}
     try {
-      this.cursors = JSON.parse(await readFile(path.join(this.dir, 'scan.json'), 'utf8'))
+      const c = JSON.parse(await readFile(path.join(this.dir, 'scan.json'), 'utf8'))
+      if (c.__v === CURSOR_VERSION) this.cursors = c
     } catch {}
   }
 
@@ -401,7 +465,10 @@ export class UsageStore {
       return 'new'
     }
     const better = prev.side !== e.side ? prev.side : total(e) > total(prev)
-    if (!better && !(e.cost !== undefined && e.cost !== prev.cost)) return 'same'
+    const rolled =
+      (e.cost !== undefined && e.cost !== prev.cost) ||
+      (e.calls !== undefined && e.calls !== prev.calls)
+    if (!better && !rolled) return 'same'
     this.entries.set(e.key, e)
     return 'updated'
   }
@@ -424,7 +491,10 @@ export class UsageStore {
 
   async saveCursors(): Promise<void> {
     await mkdir(this.dir, { recursive: true })
-    await writeFile(path.join(this.dir, 'scan.json'), JSON.stringify(this.cursors))
+    await writeFile(
+      path.join(this.dir, 'scan.json'),
+      JSON.stringify({ ...this.cursors, __v: CURSOR_VERSION }),
+    )
   }
 }
 
@@ -537,11 +607,12 @@ export async function scan(
           store.cursors[f] = { ...cur, size: st.size, mtimeMs: st.mtimeMs }
           continue
         }
-        const head = await readHead(f, 4096)
-        const meta = head.split('\n').find((l) => l.includes('"session_meta"'))
+        // The session_meta line can run well past a few KB (workspace roots, config), so read
+        // until its newline rather than a fixed head.
+        const meta = await readFirstLine(f, 1 << 20)
         let cwd: string | undefined
         try {
-          cwd = meta ? JSON.parse(meta).payload?.cwd : undefined
+          cwd = meta && meta.includes('"session_meta"') ? JSON.parse(meta).payload?.cwd : undefined
         } catch {}
         if (!underRoots(cwd, cfg.roots)) {
           store.cursors[f] = { size: st.size, mtimeMs: st.mtimeMs, offset: 0, skip: true }
@@ -556,6 +627,35 @@ export async function scan(
           file(e)
         store.cursors[f] = { size: st.size, mtimeMs: st.mtimeMs, offset: st.size }
       }
+    } else if (src.tool === 'antigravity') {
+      const st = await stat(src.dir).catch(() => null)
+      if (!st) continue
+      const cur = store.cursors[src.dir]
+      if (cur && cur.size === st.size && cur.mtimeMs === st.mtimeMs) continue
+      let rows: AntigravityRow[] = []
+      try {
+        const { DatabaseSync } = await import('node:sqlite')
+        const db = new DatabaseSync(src.dir, { readOnly: true })
+        try {
+          rows = db
+            .prepare(
+              'select conversation_id, step_count, last_modified_time, workspace_uris, app_data_dir from conversation_summaries',
+            )
+            .all() as unknown as AntigravityRow[]
+        } finally {
+          db.close()
+        }
+      } catch (err) {
+        console.error(
+          'repo-pulse: antigravity read failed',
+          err instanceof Error ? err.message : err,
+        )
+        continue
+      }
+      files++
+      seats.add(src.seat)
+      for (const e of antigravityEntries(rows, src.seat, cfg.roots)) file(e)
+      store.cursors[src.dir] = { size: st.size, mtimeMs: st.mtimeMs, offset: st.size }
     } else if (src.tool === 'grok') {
       let dirs: string[] = []
       try {
@@ -601,12 +701,26 @@ export async function scan(
   return { changed, files, seats: [...seats] }
 }
 
-async function readHead(file: string, bytes: number): Promise<string> {
+/** The first line of a file, reading in 16 KB steps up to `max` bytes. */
+async function readFirstLine(file: string, max: number): Promise<string> {
   const fh = await open(file, 'r')
   try {
-    const buf = Buffer.alloc(bytes)
-    const { bytesRead } = await fh.read(buf, 0, bytes, 0)
-    return buf.subarray(0, bytesRead).toString('utf8')
+    const chunks: Buffer[] = []
+    let total = 0
+    while (total < max) {
+      const buf = Buffer.alloc(16384)
+      const { bytesRead } = await fh.read(buf, 0, buf.length, total)
+      if (bytesRead === 0) break
+      const part = buf.subarray(0, bytesRead)
+      const nl = part.indexOf(10)
+      if (nl >= 0) {
+        chunks.push(part.subarray(0, nl))
+        return Buffer.concat(chunks).toString('utf8')
+      }
+      chunks.push(part)
+      total += bytesRead
+    }
+    return Buffer.concat(chunks).toString('utf8')
   } finally {
     await fh.close()
   }

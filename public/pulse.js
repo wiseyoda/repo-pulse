@@ -1437,8 +1437,13 @@ function renderStats() {
 
 // --- llm usage -----------------------------------------------------------------
 
-const TOOL_LABEL = { claude: 'Claude Code', codex: 'Codex', grok: 'Grok' }
-const TOOL_ORDER = ['claude', 'codex', 'grok']
+const TOOL_LABEL = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  grok: 'Grok',
+  antigravity: 'Antigravity',
+}
+const TOOL_ORDER = ['claude', 'codex', 'grok', 'antigravity']
 const SERIES = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)']
 const seriesColor = (i) => SERIES[Math.min(i, SERIES.length - 1)]
 
@@ -1602,7 +1607,7 @@ function usageEnableCard() {
       : h(
           'p',
           { class: 'muted' },
-          'No Claude Code, Codex, or Grok data directories were found under your home directory.',
+          'No Claude Code, Codex, Grok, or Antigravity data was found under your home directory.',
         ),
     h(
       'p',
@@ -2141,6 +2146,11 @@ function skeleton() {
 }
 
 try {
+  // ?window=24h in the URL beats the remembered window, so a link can pin the range.
+  const fromUrl = [...els.window.querySelectorAll('button')].find(
+    (b) => b.textContent === new URLSearchParams(location.search).get('window'),
+  )
+  if (fromUrl) localStorage.setItem('repo-pulse.window', fromUrl.dataset.w)
   const w = localStorage.getItem('repo-pulse.window')
   if (w !== null && [...els.window.querySelectorAll('button')].some((b) => b.dataset.w === w)) {
     state.window = Number(w)
