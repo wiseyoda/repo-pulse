@@ -5,6 +5,7 @@ import {
   commitsBetween,
   gitDir,
   headSha,
+  LineCountCache,
   listWorktrees,
   readCommits,
   readWorkingTree,
@@ -30,6 +31,7 @@ const HISTORY_MAX = 500
 /** Watches one worktree: filesystem events feed a debounced git snapshot; reflog writes and a slow poll catch commits. */
 export class WorktreeWatcher {
   private prev = new Map<string, FileStat>()
+  private readonly lines = new LineCountCache()
   private head: string | null = null
   private touched = new Set<string>()
   private debounce: NodeJS.Timeout | null = null
@@ -51,7 +53,7 @@ export class WorktreeWatcher {
   async start(): Promise<void> {
     const root = this.wt.path
     this.head = await headSha(root)
-    this.prev = await readWorkingTree(root, this.head)
+    this.prev = await readWorkingTree(root, this.head, this.lines)
     this.hooks.onSnapshot({ wt: this.wt, files: [...this.prev.values()], at: Date.now() })
 
     if (this.head) {
@@ -131,11 +133,12 @@ export class WorktreeWatcher {
 
   private async refresh(): Promise<void> {
     const root = this.wt.path
-    const touched = this.touched
-    this.touched = new Set()
     const now = Date.now()
     const head = await headSha(root)
-    const next = await readWorkingTree(root, head)
+    const next = await readWorkingTree(root, head, this.lines)
+    // Consumed only once git answered, so a failed read keeps the paths for the retry.
+    const touched = this.touched
+    this.touched = new Set()
     const out: Emitted[] = []
 
     if (head !== this.head) {
@@ -156,7 +159,6 @@ export class WorktreeWatcher {
           branch: this.wt.branch,
         })
       }
-      this.head = head
       const refreshed = (await listWorktrees(root)).find((w) => w.path === root)
       if (refreshed) this.wt = refreshed
     } else {
@@ -164,10 +166,22 @@ export class WorktreeWatcher {
         out.push({ type: 'edit', ts: now, wt: this.wt.id, ...d })
       }
     }
+    const changed = head !== this.head || out.length > 0 || !sameFiles(this.prev, next)
+    this.head = head
     this.prev = next
     if (out.length) this.hooks.onEvents(out)
-    this.hooks.onSnapshot({ wt: this.wt, files: [...next.values()], at: now })
+    // A tick that changed nothing (an ignored file, an identical rewrite) costs clients nothing.
+    if (changed) this.hooks.onSnapshot({ wt: this.wt, files: [...next.values()], at: now })
   }
+}
+
+function sameFiles(a: Map<string, FileStat>, b: Map<string, FileStat>): boolean {
+  if (a.size !== b.size) return false
+  for (const [p, x] of a) {
+    const y = b.get(p)
+    if (!y || x.added !== y.added || x.deleted !== y.deleted || x.status !== y.status) return false
+  }
+  return true
 }
 
 const WORKTREE_POLL_MS = 10_000

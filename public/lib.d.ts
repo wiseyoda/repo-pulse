@@ -26,3 +26,17 @@ export function mergeFeed<T extends { ts: number; id: number }>(
   heads: T[],
   since: number,
 ): T[]
+export interface DiffLine {
+  cls: 'file' | 'meta' | 'head' | 'hunk' | 'add' | 'del' | 'ctx'
+  text: string
+  old?: number
+  new?: number
+  path?: string
+}
+export function numberDiff(text: string): DiffLine[]
+export function feedTotals(rows: { type: string; dAdded?: number; dDeleted?: number }[]): {
+  added: number
+  deleted: number
+  edits: number
+  commits: number
+}

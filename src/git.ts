@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { open } from 'node:fs/promises'
+import { open, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
@@ -9,6 +9,8 @@ const MAX_BUFFER = 64 * 1024 * 1024
 const MAX_UNTRACKED_COUNTED = 2000
 const MAX_COUNT_BYTES = 4 * 1024 * 1024
 const READ_CONCURRENCY = 32
+/** Observe only: never refresh the index or take index.lock, so agents' own git commands are never blocked. */
+const GIT_ENV = { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' }
 
 export type FileStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
 
@@ -51,6 +53,7 @@ export async function git(cwd: string, args: string[]): Promise<string> {
     cwd,
     maxBuffer: MAX_BUFFER,
     encoding: 'utf8',
+    env: GIT_ENV,
   })
   return stdout
 }
@@ -196,6 +199,12 @@ export async function gitDir(cwd: string): Promise<string> {
   return path.resolve(cwd, dir)
 }
 
+/** The shared `.git` of a repo; identical for every worktree, so it identifies the repo. */
+export async function commonDir(cwd: string): Promise<string> {
+  const dir = (await git(cwd, ['rev-parse', '--git-common-dir'])).trim()
+  return path.resolve(cwd, dir)
+}
+
 export async function headSha(cwd: string): Promise<string | null> {
   try {
     return (await git(cwd, ['rev-parse', '--verify', '-q', 'HEAD'])).trim() || null
@@ -209,7 +218,42 @@ export async function listWorktrees(cwd: string): Promise<Worktree[]> {
   return parseWorktreeList(raw).map((w) => ({ id: worktreeId(w.path), ...w }))
 }
 
-async function countLines(file: string): Promise<{ lines: number; binary: boolean }> {
+export interface LineCount {
+  lines: number
+  binary: boolean
+}
+
+/** Remembers line counts by (size, mtime) so an idle untracked file costs one stat per tick, not a read. */
+export class LineCountCache {
+  private entries = new Map<string, { size: number; mtimeMs: number; count: LineCount }>()
+
+  async count(file: string): Promise<LineCount> {
+    let size: number
+    let mtimeMs: number
+    try {
+      const st = await stat(file)
+      if (!st.isFile()) return { lines: 0, binary: false }
+      size = st.size
+      mtimeMs = st.mtimeMs
+    } catch {
+      this.entries.delete(file)
+      return { lines: 0, binary: false }
+    }
+    const hit = this.entries.get(file)
+    if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.count
+    const count = await countLines(file)
+    this.entries.set(file, { size, mtimeMs, count })
+    return count
+  }
+
+  /** Drop entries for files git no longer reports, so the cache tracks the working tree. */
+  retain(files: Iterable<string>): void {
+    const keep = new Set(files)
+    for (const k of this.entries.keys()) if (!keep.has(k)) this.entries.delete(k)
+  }
+}
+
+async function countLines(file: string): Promise<LineCount> {
   let handle
   try {
     handle = await open(file, 'r')
@@ -245,6 +289,7 @@ async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise
 export async function readWorkingTree(
   cwd: string,
   head: string | null,
+  cache: LineCountCache = new LineCountCache(),
 ): Promise<Map<string, FileStat>> {
   const files = new Map<string, FileStat>()
   if (head) {
@@ -270,7 +315,9 @@ export async function readWorkingTree(
     .split('\0')
     .filter(Boolean)
   const counted = untracked.slice(0, MAX_UNTRACKED_COUNTED)
-  const counts = await mapPool(counted, READ_CONCURRENCY, (p) => countLines(path.join(cwd, p)))
+  const abs = counted.map((p) => path.join(cwd, p))
+  const counts = await mapPool(abs, READ_CONCURRENCY, (f) => cache.count(f))
+  cache.retain(abs)
   counted.forEach((p, i) => {
     const c = counts[i] ?? { lines: 0, binary: false }
     files.set(p, { path: p, status: 'untracked', added: c.lines, deleted: 0, binary: c.binary })

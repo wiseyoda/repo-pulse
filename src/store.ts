@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { EditDelta } from './delta.ts'
 import type { Commit, FileStat, Worktree } from './git.ts'
@@ -49,6 +49,7 @@ export class EventStore {
   commits: CommitEvent[] = []
   heads: HeadEvent[] = []
   snapshots = new Map<string, WorktreeSnapshot>()
+  private shas = new Set<string>()
   private nextId = 1
   private writeQueue: Promise<void> = Promise.resolve()
 
@@ -67,36 +68,60 @@ export class EventStore {
       return
     }
     const since = Date.now() - LOAD_WINDOW_MS
+    let dropped = 0
     for (const line of raw.split('\n')) {
       if (!line) continue
       try {
         const ev = JSON.parse(line) as PulseEvent
-        if (ev.ts < since) continue
+        if (ev.id >= this.nextId) this.nextId = ev.id + 1
+        if (ev.ts < since) {
+          dropped++
+          continue
+        }
         if (ev.type === 'edit') this.edits.push(ev)
         else if (ev.type === 'head') this.heads.push(ev)
-        if (ev.id >= this.nextId) this.nextId = ev.id + 1
       } catch {
         // A torn last line from a crash is not worth failing startup over.
+        dropped++
       }
     }
+    dropped +=
+      Math.max(0, this.edits.length - MAX_EDITS) + Math.max(0, this.heads.length - MAX_HEADS)
     this.edits = this.edits.slice(-MAX_EDITS)
     this.heads = this.heads.slice(-MAX_HEADS)
+    if (dropped > 0) await this.compact()
+  }
+
+  /** Rewrites the log with only what was kept, so it does not grow without bound. */
+  private async compact(): Promise<void> {
+    if (!this.logPath) return
+    const kept = [...this.edits, ...this.heads].sort((a, b) => a.id - b.id)
+    const tmp = `${this.logPath}.tmp`
+    try {
+      await mkdir(path.dirname(this.logPath), { recursive: true })
+      await writeFile(tmp, kept.map((ev) => JSON.stringify(ev) + '\n').join(''))
+      await rename(tmp, this.logPath)
+    } catch (err) {
+      console.error('repo-pulse: could not compact event log', err)
+    }
   }
 
   /** Assigns an id, files the event, and persists edits/heads. Commits are re-read from git on start. Returns null for a commit already filed. */
   add(ev: NewEvent): PulseEvent | null {
-    if (
-      ev.type === 'commit' &&
-      this.commits.some((c) => c.commit.sha === ev.commit.sha && c.wt === ev.wt)
-    ) {
-      return null
-    }
+    // Worktrees share history, so a sha is filed once no matter how many of them reach it.
+    if (ev.type === 'commit' && this.shas.has(ev.commit.sha)) return null
+    if (ev.type === 'commit') this.shas.add(ev.commit.sha)
     const full = { ...ev, id: this.nextId++ } as PulseEvent
     if (full.type === 'edit') this.edits = [...this.edits, full].slice(-MAX_EDITS)
     else if (full.type === 'commit') this.commits = [...this.commits, full].slice(-MAX_COMMITS)
     else this.heads = [...this.heads, full].slice(-MAX_HEADS)
     if (full.type !== 'commit') this.persist(full)
     return full
+  }
+
+  /** Resolves once every queued append has hit disk; call before exiting. */
+  flush(): Promise<void> {
+    return this.writeQueue
   }
 
   private persist(ev: PulseEvent): void {

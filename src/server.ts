@@ -25,6 +25,24 @@ const HEARTBEAT_MS = 15_000
 const MAX_DIFF_BYTES = 2 * 1024 * 1024
 const SHA_RE = /^[0-9a-f]{7,40}$/
 
+function isLoopbackHost(host: string | undefined): boolean {
+  if (!host) return false
+  const name = host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '')
+  return name === '127.0.0.1' || name === 'localhost' || name === '::1'
+}
+
+function sameOrigin(req: http.IncomingMessage): boolean {
+  const site = req.headers['sec-fetch-site']
+  if (site) return site === 'same-origin' || site === 'none'
+  const origin = req.headers.origin
+  if (!origin) return true
+  try {
+    return isLoopbackHost(new URL(origin).host)
+  } catch {
+    return false
+  }
+}
+
 export class PulseServer {
   readonly server: http.Server
   private readonly clients = new Set<http.ServerResponse>()
@@ -72,6 +90,17 @@ export class PulseServer {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const method = req.method ?? 'GET'
 
+    // Loopback only, and only from our own page: a site you visit must not be able to reach
+    // the diff endpoints through DNS rebinding or a cross-origin POST.
+    if (!isLoopbackHost(req.headers.host)) {
+      res.writeHead(421, { 'content-type': 'text/plain' })
+      return void res.end('wrong host')
+    }
+    if (method !== 'GET' && !sameOrigin(req)) {
+      res.writeHead(403, { 'content-type': 'text/plain' })
+      return void res.end('forbidden')
+    }
+
     const asset = STATIC[url.pathname]
     if (method === 'GET' && asset) {
       const body = await readFile(path.join(PUBLIC_DIR, asset.file))
@@ -81,11 +110,17 @@ export class PulseServer {
     }
     if (method === 'GET' && url.pathname === '/events') return this.stream(req, res)
     if (method === 'GET' && url.pathname === '/api/state') return this.json(res, this.state())
+    if (method === 'GET' && url.pathname === '/api/health') return this.json(res, this.health())
     if (method === 'GET' && url.pathname === '/api/diff') return this.diff(url, res)
     if (method === 'GET' && url.pathname === '/api/commit') return this.commit(url, res)
     if (method === 'POST' && url.pathname === '/api/cmux-diff') return this.cmuxDiff(url, res)
     res.writeHead(404, { 'content-type': 'text/plain' })
     res.end('not found')
+  }
+
+  /** Enough for a second `repo-pulse` on the same repo to recognise this one and reuse it. */
+  private health(): unknown {
+    return { ok: true, name: 'repo-pulse', root: this.opts.root, pid: process.pid }
   }
 
   private state(): unknown {

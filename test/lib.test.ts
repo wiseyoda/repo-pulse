@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_ITEM_PATTERN,
   extractItems,
+  feedTotals,
   magnitudeWidth,
   mergeFeed,
+  numberDiff,
   relativeTime,
   rollupCommits,
 } from '../public/lib.js'
@@ -78,5 +80,67 @@ describe('mergeFeed', () => {
       15,
     )
     expect(rows.map((r) => r.id)).toEqual([2, 3])
+  })
+})
+
+describe('numberDiff', () => {
+  it('numbers context, added, and deleted lines from the hunk header', () => {
+    const text = [
+      'diff --git a/src/a.py b/src/a.py',
+      'index 1..2 100644',
+      '--- a/src/a.py',
+      '+++ b/src/a.py',
+      '@@ -10,3 +10,4 @@ def f():',
+      ' one',
+      '-two',
+      '+TWO',
+      '+three',
+      ' four',
+    ].join('\n')
+    const lines = numberDiff(text)
+    expect(lines[0]).toMatchObject({ cls: 'file', path: 'src/a.py' })
+    expect(lines[1]?.cls).toBe('meta')
+    expect(lines[4]?.cls).toBe('hunk')
+    expect(lines.slice(5)).toEqual([
+      { cls: 'ctx', old: 10, new: 10, text: ' one' },
+      { cls: 'del', old: 11, text: '-two' },
+      { cls: 'add', new: 11, text: '+TWO' },
+      { cls: 'add', new: 12, text: '+three' },
+      { cls: 'ctx', old: 12, new: 13, text: ' four' },
+    ])
+  })
+  it('leaves a commit header and stat block unnumbered and drops the trailing newline', () => {
+    const lines = numberDiff(
+      'abc\nauthor\n\nsubject\n\n a.py | 1 +\ndiff --git a/a.py b/a.py\n@@ -0,0 +1 @@\n+x\n',
+    )
+    expect(lines.map((l) => l.cls)).toEqual([
+      'head',
+      'head',
+      'head',
+      'head',
+      'head',
+      'head',
+      'file',
+      'hunk',
+      'add',
+    ])
+    expect(lines.at(-1)).toEqual({ cls: 'add', new: 1, text: '+x' })
+  })
+  it('does not mistake a deleted line starting with --- for a header inside a hunk', () => {
+    // A hunk line "--- x" is ambiguous in unified diffs; git itself emits "-" + "-- x".
+    const lines = numberDiff('@@ -1 +1 @@\n-x\n+y\n\\ No newline at end of file')
+    expect(lines.map((l) => l.cls)).toEqual(['hunk', 'del', 'add', 'meta'])
+  })
+})
+
+describe('feedTotals', () => {
+  it('counts a revert as deletions and ignores head moves', () => {
+    const rows = [
+      { type: 'edit', dAdded: 5, dDeleted: 1 },
+      { type: 'edit', dAdded: -3, dDeleted: 0 },
+      { type: 'commit' },
+      { type: 'head' },
+    ]
+    expect(feedTotals(rows)).toEqual({ added: 5, deleted: 4, edits: 2, commits: 1 })
   })
 })

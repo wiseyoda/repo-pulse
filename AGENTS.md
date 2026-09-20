@@ -12,25 +12,31 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
 
 ## Commands
 
-- `pnpm start [path] [--port N] [--open]` — run against a repo (default: cwd)
+- `pnpm start [path] [-d] [--no-open] [--port N]` — run against a repo (default: cwd); opens the
+  page by default, as a cmux browser tab in the caller's pane when inside cmux
 - `pnpm verify` — typecheck + prettier + vitest; run before reporting anything done
 - `pnpm test` — vitest only (`test/git.integration.test.ts` drives a real temp git repo)
 
 ## Layout
 
 - `src/git.ts` — git shell-outs and NUL-safe parsers; no other file calls git
-- `src/store.ts` — ring buffers + append-only JSONL under `~/.repo-pulse/<repo>-<id>/`
-- `src/server.ts` — plain `node:http`: static files, `/api/state`, `/events` (SSE), diffs
-- `src/cli.ts` — arg parsing, wiring, `--open` (cmux browser pane when inside cmux, else default browser)
+- `src/store.ts` — ring buffers + append-only JSONL under `~/.repo-pulse/<repo>-<id>/`, compacted on load
+- `src/server.ts` — plain `node:http`: static files, `/api/state`, `/api/health`, `/events` (SSE), diffs
+- `src/cli.ts` — arg parsing, wiring, instance reuse via `server.json`, `--detach`/`--stop`, opening
+  the page (`cmux new-surface` in the caller's pane when inside cmux, else the default browser)
 - `bin/repo-pulse` — shim; symlinked from `~/.local/bin/repo-pulse`
 
 ## Rules
 
 - Zero runtime dependencies. Node 24 runs the `.ts` sources directly; keep syntax erasable
   (no enums, no parameter properties).
-- Never write into the watched repo. Diff endpoints only accept paths git already reports.
+- Never write into the watched repo. Every git call runs with `GIT_OPTIONAL_LOCKS=0` so the
+  watcher never takes `index.lock` from under an agent. Diff endpoints only accept paths git
+  already reports.
+- The server refuses non-loopback `Host` headers and cross-origin POSTs; keep it that way.
 - Commits are re-read from git on start; only edits and HEAD moves are persisted.
-- Server binds 127.0.0.1 only.
+- Server binds 127.0.0.1 only. The default port falls back to a free one; an explicit `--port` fails loudly.
+- One state dir per repo, keyed by the main worktree, so every worktree shares one log and one instance.
 
 ## Traps
 
@@ -39,3 +45,5 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
 - Editing an already-changed line keeps `--numstat` identical; the `touched` path set from
   the watcher is what makes that still register as an edit.
 - Spotlight-style hidden-dir noise is not a concern here: git's ignore rules filter everything.
+- The page coalesces renders into one frame; in a background tab (no frames) it falls back to a
+  timer. Re-rendering a list with `replaceChildren` clamps `scrollTop` to 0, so renders restore it.

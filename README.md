@@ -4,12 +4,18 @@ See what agents are doing to a repo as it happens: every edit with its size, eve
 the diff one click away.
 
 ```sh
-repo-pulse ~/dev/some-repo --open
+cd ~/dev/some-repo
+repo-pulse        # opens the feed: a cmux browser tab in your pane, or your default browser
+repo-pulse -d     # same, but runs in the background and gives the terminal back
+repo-pulse --stop # stop the background instance for this repo
 ```
 
-Then keep the page open. Rows appear as files change. Click a row for the diff, `j`/`k` to move,
-`Esc` to close, `/` to filter. Commits in the window are rolled up by work item id (`W-032`,
-`D-43`; change the pattern with `--items`).
+Run it from anywhere inside a repo. Running it again for a repo that already has a feed just
+opens that feed; a second repo gets the next free port. Rows appear as files change. Click a
+row for the diff, `j`/`k` to move, `Enter` to open, `Esc` to close, `/` to filter, `1`–`5` to
+pick a window, `g` to jump to the top. New rows queue behind a pill while you are scrolled into
+history. Commits in the window are rolled up by work item id (`W-032`, `D-43`; change the
+pattern with `--items`). Click a worktree chip to see only that worktree.
 
 ## Install
 
@@ -22,9 +28,14 @@ Requires Node 24+ and git. No runtime dependencies.
 
 ## Options
 
-| Flag              | Meaning                                                                           |
-| ----------------- | --------------------------------------------------------------------------------- |
-| `--port <n>`      | Port (default 4747, `0` picks a free one)                                         |
-| `--open`          | Open the page: a cmux browser pane when run inside cmux, else the default browser |
-| `--items <regex>` | Work-item id pattern for commit roll-ups                                          |
-| `--no-persist`    | Don't keep the edit log under `~/.repo-pulse`                                     |
+| Flag              | Meaning                                                 |
+| ----------------- | ------------------------------------------------------- |
+| `-d`, `--detach`  | Run in the background; `repo-pulse --stop` ends it      |
+| `--no-open`       | Don't open the page                                     |
+| `--no-focus`      | Open the page without switching to it                   |
+| `--port <n>`      | Port (default 4747 or the next free one; `0` picks any) |
+| `--items <regex>` | Work-item id pattern for commit roll-ups                |
+| `--no-persist`    | Don't keep the edit log under `~/.repo-pulse`           |
+
+State lives under `~/.repo-pulse/<repo>-<id>/`: `events.jsonl` (edits and HEAD moves, kept for
+7 days), `server.json` (the running instance), and `server.log` when detached.

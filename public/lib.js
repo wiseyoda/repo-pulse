@@ -69,3 +69,61 @@ export function mergeFeed(edits, commits, heads, since) {
   for (const h of heads) if (h.ts >= since) rows.push(h)
   return rows.sort((a, b) => b.ts - a.ts || b.id - a.id)
 }
+
+/**
+ * Give every line of a unified diff its old/new line numbers and a class. Hunk headers reset
+ * the counters; file headers, metadata, and anything before the first hunk (a commit message,
+ * a stat block) carry none. Pure, so the page and tests share it.
+ */
+export function numberDiff(text) {
+  const out = []
+  const lines = text.split('\n')
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
+  let oldNo = 0
+  let newNo = 0
+  let inHunk = false
+  for (const line of lines) {
+    if (line.startsWith('diff --git')) {
+      inHunk = false
+      out.push({ cls: 'file', text: line, path: line.replace(/^diff --git a\/.* b\//, '') })
+      continue
+    }
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+    if (hunk) {
+      inHunk = true
+      oldNo = Number(hunk[1])
+      newNo = Number(hunk[2])
+      out.push({ cls: 'hunk', text: line })
+      continue
+    }
+    if (!inHunk) {
+      const meta =
+        /^(\+\+\+|---|index |new file|deleted file|similarity|rename |old mode|new mode|Binary )/.test(
+          line,
+        )
+      out.push({ cls: meta ? 'meta' : 'head', text: line })
+      continue
+    }
+    if (line.startsWith('+')) out.push({ cls: 'add', new: newNo++, text: line })
+    else if (line.startsWith('-')) out.push({ cls: 'del', old: oldNo++, text: line })
+    else if (line.startsWith('\\')) out.push({ cls: 'meta', text: line })
+    else out.push({ cls: 'ctx', old: oldNo++, new: newNo++, text: line })
+  }
+  return out
+}
+
+/** Sum of every row's net change, so a window's total reads at a glance. */
+export function feedTotals(rows) {
+  let added = 0
+  let deleted = 0
+  let edits = 0
+  let commits = 0
+  for (const r of rows) {
+    if (r.type === 'edit') {
+      edits++
+      added += Math.max(0, r.dAdded) + Math.max(0, -r.dDeleted)
+      deleted += Math.max(0, r.dDeleted) + Math.max(0, -r.dAdded)
+    } else if (r.type === 'commit') commits++
+  }
+  return { added, deleted, edits, commits }
+}
