@@ -34,6 +34,11 @@
         --sans: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
         --top-h: 48px;
         --foot-h: 30px;
+        /* categorical series (dataviz reference palette, light) */
+        --s1: #2a78d6;
+        --s2: #eb6834;
+        --s3: #1baf7a;
+        --s4: #eda100;
       }
       @media (prefers-color-scheme: dark) {
         :root:not([data-theme='light']) {
@@ -59,6 +64,10 @@
           --shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
           --pill-bg: #e4e6ea;
           --pill-fg: #0f1114;
+          --s1: #3987e5;
+          --s2: #d95926;
+          --s3: #199e70;
+          --s4: #c98500;
         }
       }
       :root[data-theme='dark'] {
@@ -84,6 +93,10 @@
         --shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
         --pill-bg: #e4e6ea;
         --pill-fg: #0f1114;
+        --s1: #3987e5;
+        --s2: #d95926;
+        --s3: #199e70;
+        --s4: #c98500;
       }
 
       * {
@@ -863,6 +876,109 @@
       .dash .empty {
         grid-column: span 12;
       }
+      .card.enable {
+        grid-column: 1 / -1;
+        max-width: 640px;
+        justify-self: center;
+        width: 100%;
+        padding: 20px 22px;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      .card.enable h3 {
+        font-size: 13px;
+        margin-bottom: 10px;
+      }
+      .card.enable p {
+        margin: 0 0 10px;
+      }
+      .card.enable ul {
+        margin: 0 0 12px;
+        padding-left: 18px;
+      }
+      .card.enable code {
+        font-family: var(--mono);
+        font-size: 11.5px;
+      }
+      .card.enable .actions {
+        margin-top: 14px;
+      }
+      .btn.primary {
+        background: var(--fg);
+        color: var(--bg);
+        border-color: var(--fg);
+        font-weight: 500;
+      }
+      .card.note {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 11.5px;
+        color: var(--muted);
+        padding: 10px 14px;
+      }
+      .card.note .actions {
+        margin-left: auto;
+        display: flex;
+        gap: 6px;
+        flex: none;
+      }
+      .tbl {
+        display: grid;
+        grid-template-columns: 110px 120px 60px minmax(0, 1.4fr) minmax(0, 1fr) 70px 70px;
+        column-gap: 12px;
+        row-gap: 4px;
+        font-size: 12px;
+        align-items: center;
+      }
+      .tbl .th,
+      .tbl .tr {
+        display: contents;
+      }
+      .tbl .th > span {
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--faint);
+        padding-bottom: 4px;
+        border-bottom: 1px solid var(--line);
+      }
+      .tbl .tr > span {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        line-height: 24px;
+      }
+      .tbl .mono {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .tbl .num {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .tbl .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+        margin-right: 6px;
+        vertical-align: -1px;
+      }
+      @media (max-width: 960px) {
+        .tbl {
+          grid-template-columns: 90px 100px minmax(0, 1fr) 60px 60px;
+        }
+        .tbl .th > span:nth-child(3),
+        .tbl .th > span:nth-child(5),
+        .tbl .tr > span:nth-child(3),
+        .tbl .tr > span:nth-child(5) {
+          display: none;
+        }
+      }
       .tip {
         position: fixed;
         z-index: 20;
@@ -1423,6 +1539,7 @@
       <div class="seg view" id="view" role="group" aria-label="View">
         <button data-view="feed" class="on">Feed</button>
         <button data-view="stats">Stats</button>
+        <button data-view="usage">Usage</button>
       </div>
       <div class="seg" id="window" role="group" aria-label="Time window">
         <button data-w="900000">15m</button>
@@ -1446,6 +1563,7 @@
       <button data-panel="tree">Working tree<span class="count" id="tab-tree"></span></button>
       <button data-panel="items">Work items<span class="count" id="tab-items"></span></button>
       <button data-panel="stats">Stats</button>
+      <button data-panel="usage">Usage</button>
     </nav>
     <main class="grid">
       <section class="col feed on" id="panel-feed">
@@ -1468,6 +1586,7 @@
       </aside>
     </main>
     <section class="dash" id="panel-stats" hidden aria-label="Stats"></section>
+    <section class="dash" id="panel-usage" hidden aria-label="LLM usage"></section>
     <div class="tip" id="tip" hidden></div>
     <footer class="foot">
       <span class="status" id="status">connecting…</span>

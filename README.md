@@ -105,6 +105,28 @@ log, so it works for any repo:
 - **Where the work is** by directory, **hot files**, **commits by type**, **tests vs source**,
   and the repo's **file mix**.
 
+### LLM usage
+
+An opt-in view (`u`, or `/#usage`) of what the coding agents working in this repo cost. Enable
+it once per repo and repo-pulse reads the transcripts on this machine whose working directory
+is inside the repo: Claude Code (every `~/.claude*` config dir, subagents included), Codex
+(`~/.codex*` rollouts), and Grok (`~/.grok` sessions). Only usage and metadata fields are read
+(tokens, model, timestamp, working directory, branch), never message content.
+
+- Tiles: API-equivalent cost, tokens, cache hit rate, sessions, cost per commit, cost per 100
+  lines changed.
+- Cost over time stacked by tool; tokens over time by class (input, cache write, cache read,
+  output); breakdowns by model, work item, branch, and account; the latest sessions.
+- Counting mirrors each tool's own accounting (ccusage's dedupe rules), and matches ccusage to
+  the token on the repos it was checked against.
+- Prices come from the public [LiteLLM price file](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json),
+  refreshed daily and cached. They mean what the same tokens would cost on the provider's API,
+  not what a subscription charges. Grok reports its own cost, which is used as is. Models the
+  file lacks can be priced in `~/.repo-usage/pricing_overrides.json` (USD per million tokens).
+- State lives under `~/.repo-usage/<repo>/`, named after the origin remote's repo name:
+  `config.json` (enabled, roots, sources), `usage.jsonl`, `scan.json`. Disable from the view or
+  by setting `enabled` to false.
+
 ### Markdown
 
 ![A markdown file rendered with the diff painted on: added lines highlighted, a removed line struck through where it was](docs/markdown.png)

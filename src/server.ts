@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { commitPatch, fileDiff, fileMix, readCommits, type Worktree } from './git.ts'
 import { stopsAt, type Health } from './instances.ts'
 import type { EventStore } from './store.ts'
+import type { UsageTracker } from './usage-tracker.ts'
 
 export interface ServerOptions {
   root: string
@@ -17,6 +18,7 @@ export interface ServerOptions {
   /** Idle budget in ms (0 = never stop) and the last repo event, for the health report. */
   idleMs: number
   lastEventAt(): number
+  usage: UsageTracker
 }
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
@@ -129,6 +131,12 @@ export class PulseServer {
     if (method === 'GET' && url.pathname === '/events') return this.stream(req, res)
     if (method === 'GET' && url.pathname === '/api/state') return this.json(res, this.state())
     if (method === 'GET' && url.pathname === '/api/health') return this.json(res, this.health())
+    if (method === 'GET' && url.pathname === '/api/usage') return this.usage(url, res)
+    if (method === 'POST' && url.pathname === '/api/usage/enable')
+      return this.usageToggle(res, true)
+    if (method === 'POST' && url.pathname === '/api/usage/disable')
+      return this.usageToggle(res, false)
+    if (method === 'POST' && url.pathname === '/api/usage/scan') return this.usageScan(res)
     if (method === 'GET' && url.pathname === '/api/stats')
       return this.json(res, await this.repoStats())
     if (method === 'GET' && url.pathname === '/api/diff') return this.diff(url, res)
@@ -165,6 +173,30 @@ export class PulseServer {
     }
   }
 
+  /** Status plus every priced entry in the last `days` (default 30), for the usage view. */
+  private async usage(url: URL, res: http.ServerResponse): Promise<void> {
+    const t = this.opts.usage
+    const days = Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 30))
+    const status = t.status()
+    this.json(res, {
+      ...status,
+      preview: status.enabled ? [] : await t.preview(),
+      entries: status.enabled ? t.entries(Date.now() - days * 86_400_000) : [],
+      days,
+    })
+  }
+
+  private async usageToggle(res: http.ServerResponse, on: boolean): Promise<void> {
+    if (on) await this.opts.usage.enable()
+    else await this.opts.usage.disable()
+    this.json(res, this.opts.usage.status())
+  }
+
+  private async usageScan(res: http.ServerResponse): Promise<void> {
+    const changed = await this.opts.usage.scanNow()
+    this.json(res, { changed, ...this.opts.usage.status() })
+  }
+
   /** Repo-level figures the page cannot derive from live events: 30 days of commit sizes and the file mix. */
   private async repoStats(): Promise<unknown> {
     if (this.stats && Date.now() - this.stats.at < STATS_TTL_MS) return this.stats.body
@@ -189,6 +221,7 @@ export class PulseServer {
       worktrees: this.opts.worktrees(),
       itemPattern: this.opts.itemPattern,
       cmux: this.opts.cmuxBin !== null,
+      usageEnabled: this.opts.usage.enabled,
       now: Date.now(),
       ...this.opts.store.state(),
     }

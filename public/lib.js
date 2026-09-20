@@ -277,3 +277,142 @@ export function compact(n) {
   if (a < 1_000_000) return `${(n / 1000).toFixed(a < 100_000 ? 1 : 0)}K`
   return `${(n / 1_000_000).toFixed(1)}M`
 }
+
+// --- llm usage ---------------------------------------------------------------
+
+const USAGE_TOKENS = (e) => e.input + e.output + e.cacheWrite + e.cacheRead
+
+/** Totals across entries: tokens by class, API-equivalent cost, cache hit ratio, unpriced count. */
+export function usageTotals(entries) {
+  const t = {
+    usd: 0,
+    tokens: 0,
+    input: 0,
+    output: 0,
+    cacheWrite: 0,
+    cacheRead: 0,
+    n: 0,
+    unpriced: 0,
+    sessions: new Set(),
+  }
+  for (const e of entries) {
+    t.n++
+    t.input += e.input
+    t.output += e.output
+    t.cacheWrite += e.cacheWrite
+    t.cacheRead += e.cacheRead
+    t.tokens += USAGE_TOKENS(e)
+    if (e.usd === null || e.usd === undefined) t.unpriced++
+    else t.usd += e.usd
+    t.sessions.add(`${e.tool}:${e.session}`)
+  }
+  const prompt = t.input + t.cacheWrite + t.cacheRead
+  return { ...t, sessions: t.sessions.size, cacheHit: prompt ? t.cacheRead / prompt : 0 }
+}
+
+/** Entries grouped by `keyOf`, each with totals, sorted by cost then tokens. */
+export function groupUsage(entries, keyOf) {
+  const m = new Map()
+  for (const e of entries) {
+    const k = keyOf(e)
+    const g = m.get(k) ?? {
+      key: k,
+      usd: 0,
+      tokens: 0,
+      n: 0,
+      output: 0,
+      unpriced: 0,
+      sessions: new Set(),
+    }
+    g.n++
+    g.tokens += USAGE_TOKENS(e)
+    g.output += e.output
+    if (e.usd === null || e.usd === undefined) g.unpriced++
+    else g.usd += e.usd
+    g.sessions.add(`${e.tool}:${e.session}`)
+    m.set(k, g)
+  }
+  return [...m.values()]
+    .map((g) => ({ ...g, sessions: g.sessions.size }))
+    .sort((a, b) => b.usd - a.usd || b.tokens - a.tokens)
+}
+
+/** Per-bucket sums of `valueOf` split by `seriesOf`, covering the whole window. */
+export function bucketUsage(entries, since, now, bucketMs, seriesOf, valueOf) {
+  const start = Math.floor(since / bucketMs) * bucketMs
+  const n = Math.max(1, Math.ceil((now - start) / bucketMs))
+  const out = Array.from({ length: n }, (_, i) => ({ t: start + i * bucketMs, values: {} }))
+  for (const e of entries) {
+    if (e.ts < since) continue
+    const b = out[Math.min(n - 1, Math.max(0, Math.floor((e.ts - start) / bucketMs)))]
+    const k = seriesOf(e)
+    b.values[k] = (b.values[k] ?? 0) + valueOf(e)
+  }
+  return out
+}
+
+/**
+ * Which work item an entry served: an id in the branch name wins; otherwise the next commit
+ * after it (within `horizonMs`) names it, since a turn's work lands in the commit that follows.
+ */
+export function itemForUsage(entry, commitsAsc, pattern, horizonMs = 12 * 3_600_000) {
+  const re = new RegExp(pattern, 'g')
+  if (entry.branch) {
+    const m = entry.branch.match(re)
+    if (m) return m[0]
+  }
+  // Binary search for the first commit at or after the entry.
+  let lo = 0
+  let hi = commitsAsc.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (commitsAsc[mid].ts < entry.ts) lo = mid + 1
+    else hi = mid
+  }
+  const c = commitsAsc[lo]
+  if (!c || c.ts - entry.ts > horizonMs) return null
+  const ids = extractItems(c.subject, pattern)
+  return ids[0] ?? null
+}
+
+/** One row per session: span, models, tokens, cost, branch; newest first. */
+export function usageSessions(entries) {
+  const m = new Map()
+  for (const e of entries) {
+    const k = `${e.tool}:${e.seat}:${e.session}`
+    const s = m.get(k) ?? {
+      key: k,
+      tool: e.tool,
+      seat: e.seat,
+      session: e.session,
+      first: e.ts,
+      last: e.ts,
+      models: new Set(),
+      branch: null,
+      tokens: 0,
+      output: 0,
+      usd: 0,
+      n: 0,
+    }
+    s.first = Math.min(s.first, e.ts)
+    s.last = Math.max(s.last, e.ts)
+    s.models.add(e.model)
+    if (e.branch) s.branch = e.branch
+    s.tokens += USAGE_TOKENS(e)
+    s.output += e.output
+    s.usd += e.usd ?? 0
+    s.n++
+    m.set(k, s)
+  }
+  return [...m.values()]
+    .map((s) => ({ ...s, models: [...s.models] }))
+    .sort((a, b) => b.last - a.last)
+}
+
+export function fmtUsd(n) {
+  if (n >= 1000) return `$${(n / 1000).toFixed(1)}K`
+  if (n >= 100) return `$${n.toFixed(0)}`
+  if (n >= 10) return `$${n.toFixed(1)}`
+  if (n >= 0.01) return `$${n.toFixed(2)}`
+  return n > 0 ? '<$0.01' : '$0'
+}

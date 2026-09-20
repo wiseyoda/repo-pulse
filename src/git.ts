@@ -205,6 +205,15 @@ export async function commonDir(cwd: string): Promise<string> {
   return path.resolve(cwd, dir)
 }
 
+/** The origin URL, or null when there is no remote. */
+export async function remoteUrl(cwd: string, name = 'origin'): Promise<string | null> {
+  try {
+    return (await git(cwd, ['remote', 'get-url', name])).trim() || null
+  } catch {
+    return null
+  }
+}
+
 export async function headSha(cwd: string): Promise<string | null> {
   try {
     return (await git(cwd, ['rev-parse', '--verify', '-q', 'HEAD'])).trim() || null

@@ -90,3 +90,70 @@ export function extMix(
   keep?: number,
 ): { ext: string; n: number; share: number }[]
 export function compact(n: number): string
+
+export interface UsageLike {
+  ts: number
+  tool: string
+  seat: string
+  session: string
+  model: string
+  branch: string | null
+  input: number
+  output: number
+  cacheWrite: number
+  cacheRead: number
+  usd: number | null
+}
+export function usageTotals(entries: UsageLike[]): {
+  usd: number
+  tokens: number
+  input: number
+  output: number
+  cacheWrite: number
+  cacheRead: number
+  n: number
+  unpriced: number
+  sessions: number
+  cacheHit: number
+}
+export function groupUsage(
+  entries: UsageLike[],
+  keyOf: (e: UsageLike) => string,
+): {
+  key: string
+  usd: number
+  tokens: number
+  n: number
+  output: number
+  unpriced: number
+  sessions: number
+}[]
+export function bucketUsage(
+  entries: UsageLike[],
+  since: number,
+  now: number,
+  bucketMs: number,
+  seriesOf: (e: UsageLike) => string,
+  valueOf: (e: UsageLike) => number,
+): { t: number; values: Record<string, number> }[]
+export function itemForUsage(
+  entry: UsageLike,
+  commitsAsc: { ts: number; subject: string }[],
+  pattern: string,
+  horizonMs?: number,
+): string | null
+export function usageSessions(entries: UsageLike[]): {
+  key: string
+  tool: string
+  seat: string
+  session: string
+  first: number
+  last: number
+  models: string[]
+  branch: string | null
+  tokens: number
+  output: number
+  usd: number
+  n: number
+}[]
+export function fmtUsd(n: number): string

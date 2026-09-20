@@ -1,12 +1,16 @@
 import {
   bucketActivity,
   bucketFor,
+  bucketUsage,
   churnBy,
   commitTypes,
   compact,
   extMix,
   feedTotals,
+  fmtUsd,
+  groupUsage,
   isTestPath,
+  itemForUsage,
   magnitudeWidth,
   mergeFeed,
   numberDiff,
@@ -16,6 +20,8 @@ import {
   splitPath,
   tempo,
   testShare,
+  usageSessions,
+  usageTotals,
 } from './lib.js'
 import { marksFromDiff, renderMarkdown } from './md.js'
 
@@ -46,6 +52,7 @@ const state = {
   view: 'feed',
   mdMode: 'rendered',
   repoStats: null, // { at, days, commits, files } from /api/stats
+  usage: { status: null, entries: [], preview: [], at: 0, loading: false, error: null },
   selectedKey: null,
   flashIds: new Set(),
   pending: 0, // live rows not yet rendered because the reader has scrolled down
@@ -68,6 +75,7 @@ const els = {
   tabs: $('tabs'),
   view: $('view'),
   stats: $('panel-stats'),
+  usage: $('panel-usage'),
   tip: $('tip'),
   grid: document.querySelector('.grid'),
   tabFeed: $('tab-feed'),
@@ -212,6 +220,7 @@ function flush() {
   if (parts.has('items')) renderItems()
   if (parts.has('status')) renderStatus()
   if (parts.has('stats') && state.view === 'stats') renderStats()
+  if (parts.has('usage') && state.view === 'usage') renderUsage()
 }
 // One render per frame however many events arrive. Frames stop in a background tab, so a
 // timer takes over there and the page is current the moment it is shown again.
@@ -222,7 +231,7 @@ function invalidate(...parts) {
   if (document.hidden) setTimeout(flush, 0)
   else requestAnimationFrame(flush)
 }
-const renderAll = () => invalidate('header', 'feed', 'tree', 'items', 'status', 'stats')
+const renderAll = () => invalidate('header', 'feed', 'tree', 'items', 'status', 'stats', 'usage')
 
 function renderHeader() {
   if (!state.repo) return
@@ -998,7 +1007,8 @@ function sparkline(values, w = 120, hgt = 22) {
 /** Card inner width for a span of the 12-column grid, so charts draw at the pixels they get. */
 function cardWidth(span) {
   const pad = innerWidth <= 960 ? 24 : 32
-  const cols = Math.max(300, els.stats.clientWidth - pad)
+  const panel = state.view === 'usage' ? els.usage : els.stats
+  const cols = Math.max(300, panel.clientWidth - pad)
   return Math.max(260, ((cols + 12) * span) / 12 - 12 - 30)
 }
 
@@ -1425,6 +1435,438 @@ function renderStats() {
   )
 }
 
+// --- llm usage -----------------------------------------------------------------
+
+const TOOL_LABEL = { claude: 'Claude Code', codex: 'Codex', grok: 'Grok' }
+const TOOL_ORDER = ['claude', 'codex', 'grok']
+const SERIES = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)']
+const seriesColor = (i) => SERIES[Math.min(i, SERIES.length - 1)]
+
+let usageReload = 0
+function scheduleUsageReload() {
+  clearTimeout(usageReload)
+  usageReload = setTimeout(() => loadUsage(true), 1500)
+}
+
+async function loadUsage(force = false) {
+  const u = state.usage
+  if (u.loading) return
+  if (!force && u.at && Date.now() - u.at < 30_000) return
+  u.loading = true
+  try {
+    const r = await fetch('/api/usage?days=30').then((x) => x.json())
+    u.status = r
+    u.entries = r.entries ?? []
+    u.preview = r.preview ?? []
+    u.at = Date.now()
+    u.error = null
+  } catch (err) {
+    u.error = err.message
+  } finally {
+    u.loading = false
+    invalidate('usage')
+  }
+}
+
+async function usagePost(pathname) {
+  els.usage.querySelectorAll('button').forEach((b) => (b.disabled = true))
+  try {
+    await fetch(pathname, { method: 'POST' })
+  } finally {
+    await loadUsage(true)
+  }
+}
+
+function usageRows() {
+  const from = since()
+  const wt = state.wtFilter && state.worktrees.find((w) => w.id === state.wtFilter)
+  const q = state.filter.trim().toLowerCase()
+  return state.usage.entries.filter(
+    (e) =>
+      e.ts >= from &&
+      (!wt || e.cwd === wt.path || e.cwd.startsWith(wt.path + '/')) &&
+      (!q || `${e.tool} ${e.seat} ${e.model} ${e.branch ?? ''}`.toLowerCase().includes(q)),
+  )
+}
+
+/** Stacked columns, one series per key, with a 2px surface gap between segments. */
+function stackedColumns(buckets, series, { fmt, bucketMs, label }) {
+  const W = cardWidth(12)
+  const H = 150
+  const padL = 44
+  const padB = 18
+  const n = buckets.length
+  const slot = (W - padL) / n
+  const bw = Math.min(24, Math.max(1, slot - 2))
+  const totals = buckets.map((b) => series.reduce((s, k) => s + (b.values[k.key] ?? 0), 0))
+  const max = Math.max(1e-9, ...totals)
+  const plotH = H - padB - 10
+  const scale = (v) => (v / max) * plotH
+  const spanMs = n * bucketMs
+  const ticks = []
+  const every = Math.max(1, Math.round(n / 6))
+  for (let i = 0; i < n; i += every) if (padL + i * slot < W - 48) ticks.push(i)
+  const cols = buckets.map((b, i) => {
+    const x = padL + i * slot + (slot - bw) / 2
+    let y = H - padB
+    const segs = []
+    series.forEach((s, si) => {
+      const v = b.values[s.key] ?? 0
+      if (v <= 0) return
+      const hgt = scale(v)
+      y -= hgt
+      segs.push(
+        svg('rect', {
+          x,
+          y,
+          width: bw,
+          height: Math.max(0, hgt - 2),
+          rx: 1.5,
+          fill: seriesColor(si),
+        }),
+      )
+    })
+    return svg(
+      'g',
+      {
+        onmousemove: (ev) =>
+          showTip(
+            ev.clientX,
+            ev.clientY,
+            h('div', {}, `${fmtTick(b.t, spanMs)} · ${fmtDur(bucketMs)}`),
+            ...series
+              .filter((s) => b.values[s.key])
+              .map((s, si) => h('div', {}, `${s.label}: ${fmt(b.values[s.key])}`)),
+            h('div', {}, `total ${fmt(totals[i])}`),
+          ),
+        onmouseleave: hideTip,
+      },
+      svg('rect', { class: 'hit', x: padL + i * slot, y: 0, width: slot, height: H - padB }),
+      ...segs,
+    )
+  })
+  return svg(
+    'svg',
+    { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': label },
+    svg('line', { class: 'grid-line', x1: padL, x2: W, y1: H - padB, y2: H - padB }),
+    svg('text', { class: 'axis', x: padL - 6, y: 12, 'text-anchor': 'end' }, fmt(max)),
+    ...ticks.map((i) =>
+      svg('text', { class: 'axis', x: padL + i * slot, y: H - 4 }, fmtTick(buckets[i].t, spanMs)),
+    ),
+    ...cols,
+  )
+}
+
+function seriesLegend(series) {
+  return h(
+    'div',
+    { class: 'legend', style: 'margin-top:6px' },
+    ...series.map((s, i) =>
+      h('span', {}, h('i', { style: `background:${seriesColor(i)}` }), s.label),
+    ),
+  )
+}
+
+function usageEnableCard() {
+  const u = state.usage
+  const st = u.status ?? {}
+  const found = u.preview ?? []
+  const byTool = TOOL_ORDER.map((t) => ({
+    tool: t,
+    seats: found.filter((s) => s.tool === t).map((s) => s.seat),
+  })).filter((x) => x.seats.length)
+  return h(
+    'div',
+    { class: 'card enable' },
+    h('h3', {}, 'LLM usage'),
+    h(
+      'p',
+      {},
+      `Token usage and API-equivalent cost for `,
+      h('b', {}, st.repo ?? state.repo?.name ?? 'this repo'),
+      ', read from the coding-agent transcripts on this machine whose working directory is inside the repo.',
+    ),
+    byTool.length
+      ? h(
+          'ul',
+          {},
+          ...byTool.map((x) =>
+            h(
+              'li',
+              {},
+              h('b', {}, TOOL_LABEL[x.tool] ?? x.tool),
+              ` · ${x.seats.map((s) => `~/.${s}`).join(', ')}`,
+            ),
+          ),
+        )
+      : h(
+          'p',
+          { class: 'muted' },
+          'No Claude Code, Codex, or Grok data directories were found under your home directory.',
+        ),
+    h(
+      'p',
+      { class: 'muted' },
+      'Only usage and metadata fields are read (tokens, model, timestamp, working directory, branch), never message content. Results are kept in ',
+      h('code', {}, st.dir ?? '~/.repo-usage/<repo>/'),
+      '. Prices come from the public LiteLLM price file and mean what the same tokens would cost on the provider API, not what a subscription charges.',
+    ),
+    h(
+      'div',
+      { class: 'actions' },
+      h(
+        'button',
+        { class: 'btn primary', onclick: () => usagePost('/api/usage/enable') },
+        'Enable for this repo',
+      ),
+    ),
+  )
+}
+
+function renderUsage() {
+  if (!state.loaded) return
+  const u = state.usage
+  if (!u.status) {
+    els.usage.replaceChildren(
+      h('div', { class: 'empty' }, u.error ? `Could not load usage: ${u.error}` : 'Loading…'),
+    )
+    if (!u.loading && !u.error) loadUsage()
+    return
+  }
+  if (!u.status.enabled) {
+    els.usage.replaceChildren(usageEnableCard())
+    return
+  }
+  const t = now()
+  const rows = usageRows()
+  const windowMs = state.window || 30 * 86_400_000
+  const start = t - windowMs
+  const bucketMs =
+    windowMs > 7 * 86_400_000
+      ? 86_400_000
+      : windowMs > 2 * 86_400_000
+        ? 6 * 3_600_000
+        : bucketFor(windowMs)
+  const label = state.window ? labelForWindow() : '30d'
+  const tot = usageTotals(rows)
+  const { edits, commits } = statsRows()
+  const lines = feedTotals(edits)
+  const linesChanged = lines.added + lines.deleted
+  const commitsAsc = [...state.commits]
+    .map((c) => ({ ts: c.ts, subject: c.commit.subject }))
+    .sort((a, b) => a.ts - b.ts)
+  const tools = TOOL_ORDER.filter((k) => rows.some((e) => e.tool === k))
+  const toolSeries = tools.map((k) => ({ key: k, label: TOOL_LABEL[k] ?? k }))
+  const classSeries = [
+    { key: 'input', label: 'input' },
+    { key: 'cacheWrite', label: 'cache write' },
+    { key: 'cacheRead', label: 'cache read' },
+    { key: 'output', label: 'output' },
+  ]
+  const costBuckets = bucketUsage(
+    rows,
+    start,
+    t,
+    bucketMs,
+    (e) => e.tool,
+    (e) => e.usd ?? 0,
+  )
+  const tokenBuckets = classSeries.reduce((acc, s) => {
+    const b = bucketUsage(
+      rows,
+      start,
+      t,
+      bucketMs,
+      () => s.key,
+      (e) => e[s.key],
+    )
+    b.forEach((x, i) => Object.assign((acc[i] ??= { t: x.t, values: {} }).values, x.values))
+    return acc
+  }, [])
+  const st = u.status
+  const priced = tot.n - tot.unpriced
+  const halfSpan = innerWidth <= 960 ? 12 : 6
+  const sessions = usageSessions(rows).slice(0, 12)
+  const itemRows = groupUsage(
+    rows,
+    (e) => itemForUsage(e, commitsAsc, state.itemPattern) ?? 'unassigned',
+  )
+
+  els.usage.replaceChildren(
+    h(
+      'div',
+      { class: 'tiles' },
+      tile(
+        'API-equivalent cost',
+        fmtUsd(tot.usd),
+        tot.unpriced
+          ? `${tot.unpriced} of ${tot.n} requests unpriced`
+          : `${plural(tot.n, 'request')} · last ${label}`,
+      ),
+      tile('Tokens', compact(tot.tokens), `${compact(tot.output)} output`),
+      tile(
+        'Cache hit',
+        pct(tot.cacheHit),
+        `${compact(tot.cacheRead)} of ${compact(tot.input + tot.cacheWrite + tot.cacheRead)} prompt tokens`,
+      ),
+      tile(
+        'Sessions',
+        String(tot.sessions),
+        tools.length ? tools.map((k) => TOOL_LABEL[k]).join(' · ') : 'no tool',
+      ),
+      tile(
+        'Cost per commit',
+        commits.length ? fmtUsd(tot.usd / commits.length) : '–',
+        plural(commits.length, 'commit'),
+      ),
+      tile(
+        'Cost per 100 lines',
+        linesChanged ? fmtUsd((tot.usd / linesChanged) * 100) : '–',
+        `${compact(linesChanged)} lines changed`,
+      ),
+    ),
+    card(
+      'Cost over time',
+      `per ${fmtDur(bucketMs)} · last ${label}`,
+      'full',
+      rows.length
+        ? [
+            stackedColumns(costBuckets, toolSeries, {
+              fmt: fmtUsd,
+              bucketMs,
+              label: 'Cost per bucket by tool',
+            }),
+            seriesLegend(toolSeries),
+          ]
+        : emptyNote(`No usage in the last ${label}.`),
+    ),
+    card(
+      'Tokens over time',
+      'by class',
+      'full',
+      rows.length
+        ? [
+            stackedColumns(tokenBuckets, classSeries, {
+              fmt: compact,
+              bucketMs,
+              label: 'Tokens per bucket by class',
+            }),
+            seriesLegend(classSeries),
+          ]
+        : emptyNote(`No usage in the last ${label}.`),
+    ),
+    card(
+      'By model',
+      'cost · tokens · requests',
+      '',
+      rows.length
+        ? barList(groupUsage(rows, (e) => e.model).slice(0, 8), {
+            name: (r) => r.key,
+            max: (r) => r.usd || r.tokens / 1e9,
+            value: (r) => `${fmtUsd(r.usd)} · ${compact(r.tokens)} · ${r.n}`,
+          })
+        : emptyNote('Nothing yet.'),
+    ),
+    card(
+      'By work item',
+      'branch id, else the commit that followed',
+      '',
+      rows.length
+        ? barList(itemRows.slice(0, 8), {
+            name: (r) => r.key,
+            max: (r) => r.usd || r.tokens / 1e9,
+            value: (r) => `${fmtUsd(r.usd)} · ${plural(r.sessions, 'session')}`,
+          })
+        : emptyNote('Nothing yet.'),
+    ),
+    card(
+      'By branch',
+      'Claude Code records the branch; others show as unknown',
+      '',
+      rows.length
+        ? barList(groupUsage(rows, (e) => e.branch ?? 'unknown').slice(0, 8), {
+            name: (r) => r.key,
+            max: (r) => r.usd || r.tokens / 1e9,
+            value: (r) => `${fmtUsd(r.usd)} · ${compact(r.tokens)}`,
+          })
+        : emptyNote('Nothing yet.'),
+    ),
+    card(
+      'By account',
+      'config dir the transcript came from',
+      '',
+      rows.length
+        ? barList(
+            groupUsage(rows, (e) => `${TOOL_LABEL[e.tool] ?? e.tool} · ~/.${e.seat}`).slice(0, 8),
+            {
+              name: (r) => r.key,
+              max: (r) => r.usd || r.tokens / 1e9,
+              value: (r) => `${fmtUsd(r.usd)} · ${plural(r.sessions, 'session')}`,
+            },
+          )
+        : emptyNote('Nothing yet.'),
+    ),
+    card(
+      'Sessions',
+      `latest ${sessions.length}`,
+      'full',
+      sessions.length
+        ? h(
+            'div',
+            { class: 'tbl' },
+            h(
+              'div',
+              { class: 'th' },
+              ...['tool', 'started', 'span', 'models', 'branch', 'tokens', 'cost'].map((t) =>
+                h('span', {}, t),
+              ),
+            ),
+            ...sessions.map((s) =>
+              h(
+                'div',
+                { class: 'tr', title: `${s.session} · ~/.${s.seat} · ${plural(s.n, 'request')}` },
+                h(
+                  'span',
+                  {},
+                  h('i', {
+                    class: 'dot',
+                    style: `background:${seriesColor(TOOL_ORDER.indexOf(s.tool))}`,
+                  }),
+                  TOOL_LABEL[s.tool] ?? s.tool,
+                ),
+                h('span', {}, `${fmtDay(s.first)} ${fmtClock(s.first)}`),
+                h('span', {}, fmtDur(Math.max(0, s.last - s.first))),
+                h('span', { class: 'mono' }, s.models.join(', ')),
+                h('span', { class: 'mono' }, s.branch ?? '–'),
+                h('span', { class: 'num' }, compact(s.tokens)),
+                h('span', { class: 'num' }, fmtUsd(s.usd)),
+              ),
+            ),
+          )
+        : emptyNote('Nothing yet.'),
+    ),
+    h(
+      'div',
+      { class: 'card full note' },
+      h(
+        'span',
+        {},
+        `${plural(st.onFile, 'request')} on file · scanned ${st.lastScanAt ? relativeTime(st.lastScanAt, t) + ' ago' : 'never'} · prices: ${st.prices.models} models from ${st.prices.source}${st.prices.fetchedAt ? ', fetched ' + fmtDay(st.prices.fetchedAt) : ''}`,
+        st.unpriced.length
+          ? ` · unpriced: ${st.unpriced.join(', ')} (add to ~/.repo-usage/pricing_overrides.json)`
+          : '',
+        priced && tot.unpriced ? '' : '',
+      ),
+      h(
+        'span',
+        { class: 'actions' },
+        h('button', { class: 'btn', onclick: () => usagePost('/api/usage/scan') }, 'Rescan'),
+        h('button', { class: 'btn', onclick: () => usagePost('/api/usage/disable') }, 'Disable'),
+      ),
+    ),
+  )
+}
+
 // --- keyboard ----------------------------------------------------------------
 
 function activeList() {
@@ -1478,6 +1920,8 @@ document.addEventListener('keydown', (ev) => {
     els.filter.select()
   } else if (ev.key === 's') {
     setView(state.view === 'stats' ? 'feed' : 'stats')
+  } else if (ev.key === 'u') {
+    setView(state.view === 'usage' ? 'feed' : 'usage')
   } else if (ev.key === 'g') {
     els.feed.scrollTo({ top: 0 })
     if (state.pending) invalidate('feed')
@@ -1555,7 +1999,7 @@ document.addEventListener('visibilitychange', () => {
 
 function setPanel(panel) {
   setPanelTab(panel)
-  setView(panel === 'stats' ? 'stats' : 'feed')
+  setView(VIEW_OF_PANEL[panel] ?? 'feed')
   if (panel === 'feed' && state.pending) invalidate('feed')
 }
 
@@ -1566,18 +2010,25 @@ function setPanelTab(panel) {
   for (const id of ['feed', 'tree', 'items']) $(`panel-${id}`).classList.toggle('on', id === panel)
 }
 
-/** Feed (the three panels) or Stats (the dashboard) fill the same area; only one is live. */
+const VIEW_OF_PANEL = { stats: 'stats', usage: 'usage' }
+
+/** Feed (the three panels), Stats, or Usage fill the same area; only one is live. */
 function setView(view) {
   state.view = view
   for (const b of els.view.querySelectorAll('button'))
     b.classList.toggle('on', b.dataset.view === view)
-  els.grid.hidden = view === 'stats'
+  els.grid.hidden = view !== 'feed'
   els.stats.hidden = view !== 'stats'
+  els.usage.hidden = view !== 'usage'
   if (view === 'stats') {
     if (state.panel !== 'stats') setPanelTab('stats')
     invalidate('stats')
     loadRepoStats()
-  } else if (state.panel === 'stats') setPanelTab('feed')
+  } else if (view === 'usage') {
+    if (state.panel !== 'usage') setPanelTab('usage')
+    invalidate('usage')
+    loadUsage()
+  } else if (VIEW_OF_PANEL[state.panel]) setPanelTab('feed')
   if (location.hash !== `#${view}`) history.replaceState(null, '', `#${view}`)
   try {
     localStorage.setItem('repo-pulse.view', view)
@@ -1648,6 +2099,9 @@ function connect() {
   es.addEventListener('sample', (m) => {
     if (ingest(JSON.parse(m.data))) invalidate('stats')
   })
+  es.addEventListener('usage', () => {
+    if (state.usage.status?.enabled) scheduleUsageReload()
+  })
   es.addEventListener('snapshot', (m) => {
     const sn = JSON.parse(m.data)
     state.snapshots.set(sn.wt.id, sn)
@@ -1697,8 +2151,11 @@ try {
   state.mdMode = localStorage.getItem('repo-pulse.mdMode') === 'diff' ? 'diff' : 'rendered'
   const theme = localStorage.getItem('repo-pulse.theme')
   setTheme(THEMES.includes(theme) ? theme : 'auto')
-  const wanted = location.hash === '#stats' ? 'stats' : location.hash === '#feed' ? 'feed' : null
-  if ((wanted ?? localStorage.getItem('repo-pulse.view')) === 'stats') setView('stats')
+  const wanted = ['#stats', '#usage', '#feed'].includes(location.hash)
+    ? location.hash.slice(1)
+    : null
+  const view = wanted ?? localStorage.getItem('repo-pulse.view')
+  if (view === 'stats' || view === 'usage') setView(view)
 } catch {
   setTheme('auto')
   setWrap(true)

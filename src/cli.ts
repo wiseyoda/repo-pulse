@@ -17,6 +17,7 @@ import {
 } from './instances.ts'
 import { PulseServer } from './server.ts'
 import { EventStore } from './store.ts'
+import { UsageTracker } from './usage-tracker.ts'
 import { RepoWatcher } from './watcher.ts'
 
 const execFileAsync = promisify(execFile)
@@ -283,6 +284,11 @@ async function main(): Promise<void> {
     onWorktrees: (wts) => server.broadcast('worktrees', wts),
     onError: (err) => console.error('repo-pulse:', err instanceof Error ? err.message : err),
   })
+  const usage = await UsageTracker.create(
+    root,
+    () => watcher.worktrees().map((w) => w.path),
+    (changed) => server.broadcast('usage', { changed, at: Date.now() }),
+  )
   const server = new PulseServer({
     root,
     repoName,
@@ -292,6 +298,7 @@ async function main(): Promise<void> {
     worktrees: () => watcher.worktrees(),
     idleMs: opts.idleMs,
     lastEventAt: () => lastEventAt,
+    usage,
   })
 
   await watcher.start()
@@ -320,6 +327,7 @@ async function main(): Promise<void> {
     stopping = true
     process.stdout.write(`repo-pulse: stopping (${why})\n`)
     watcher.stop()
+    usage.stop()
     server.close()
     Promise.allSettled([store.flush(), rm(instanceFile, { force: true })]).finally(() =>
       process.exit(0),
