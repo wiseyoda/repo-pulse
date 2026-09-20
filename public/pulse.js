@@ -773,8 +773,17 @@ function materialize(n) {
 }
 
 function renderProse(text, diffText) {
-  const marks = marksFromDiff(numberDiff(diffText))
-  const nodes = renderMarkdown(text, marks).map(materialize)
+  let nodes
+  try {
+    nodes = renderMarkdown(text, marksFromDiff(numberDiff(diffText))).map(materialize)
+  } catch (err) {
+    console.error('markdown render failed', err)
+    els.prose.replaceChildren(
+      h('div', { class: 'err' }, `Could not render this file (${err.message}). Showing the diff.`),
+    )
+    setMode('diff')
+    return
+  }
   for (const a of nodes.flatMap((n) => (n.querySelectorAll ? [...n.querySelectorAll('a')] : [])))
     a.setAttribute('target', '_blank')
   els.prose.replaceChildren(

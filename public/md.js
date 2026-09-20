@@ -195,7 +195,7 @@ export function renderMarkdown(text, marks = { added: new Set(), deleted: new Ma
   }
   const lineNode = (l) => {
     const content = inline(l.text)
-    return marks.added.has(l.line) ? node('ins', { 'data-l': l.line }, ...content) : content
+    return marks.added.has(l.line) ? [node('ins', { 'data-l': l.line }, ...content)] : content
   }
   // A block with no added lines is parsed as one run, so emphasis can span source lines; one
   // with added lines is parsed per line, so the highlight lands exactly on what changed.

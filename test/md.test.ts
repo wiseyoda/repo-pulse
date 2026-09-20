@@ -69,6 +69,25 @@ describe('renderMarkdown with marks', () => {
     expect(tags(p.c)).toEqual(['ins', ' ', 'tail'])
     expect(text(out[1]!)).toBe('old line')
   })
+  it('renders a brand-new file where every line, headings included, is added', () => {
+    const text = '# Title\n\n- [ ] item\n\n> quote\n\n| a |\n|---|\n| 1 |\n'
+    const diff = numberDiff(
+      '@@ -0,0 +1,9 @@\n' +
+        text
+          .split('\n')
+          .slice(0, 9)
+          .map((l) => `+${l}`)
+          .join('\n'),
+    )
+    const out = renderMarkdown(text, marksFromDiff(diff))
+    expect(out.map((n) => n.t)).toEqual(['h1', 'ul', 'blockquote', 'table'])
+    expect(tags(out[0]!.c)).toEqual(['ins'])
+    // Blocks carry the flag; a list carries it on each item instead.
+    expect([out[0], out[2], out[3]].every((n) => String(n!.a.class).includes('ins-block'))).toBe(
+      true,
+    )
+    expect(String((out[1]!.c[0] as MdNode).a.class)).toContain('ins-block')
+  })
   it('lets emphasis span source lines when nothing in the block changed', () => {
     const out = renderMarkdown('one **two\nthree** four')
     expect(tags(out[0]!.c)).toEqual(['one ', 'strong', ' four'])
