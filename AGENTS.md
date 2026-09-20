@@ -26,8 +26,10 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
 - `src/store.ts` — ring buffers + append-only JSONL under `~/.repo-pulse/<repo>-<id>/`, compacted on load
 - `src/server.ts` — plain `node:http`: static files, `/api/state`, `/api/health`, `/api/stats`
   (30 days of commit sizes + file mix, cached 60s), `/api/file`, `/events` (SSE), diffs
-- `src/cli.ts` — arg parsing, wiring, instance reuse via `server.json`, `--detach`/`--stop`, opening
-  the page (`cmux new-surface` in the caller's pane when inside cmux, else the default browser)
+- `src/cli.ts` — arg parsing, wiring, `ps`/`--stop`/`--stop-all`, the idle-stop timer, opening the
+  page (`cmux new-surface` in the caller's pane when inside cmux, else the default browser)
+- `src/instances.ts` — the instance registry (`~/.repo-pulse/*/server.json` + `/api/health`),
+  duration parsing, and the pure idle-stop rule
 - `bin/repo-pulse` — shim; symlinked from `~/.local/bin/repo-pulse`
 
 ## Rules
@@ -42,6 +44,8 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
   persisted (samples at most one per worktree per 20s, always when totals hit zero).
 - Server binds 127.0.0.1 only. The default port falls back to a free one; an explicit `--port` fails loudly.
 - One state dir per repo, keyed by the main worktree, so every worktree shares one log and one instance.
+- An instance stops itself after `--idle` (default 2h) with no SSE viewer and no repo event; never
+  while a page is connected. Replayed history at start does not count as activity.
 
 ## Traps
 

@@ -4,6 +4,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { commitPatch, fileDiff, fileMix, readCommits, type Worktree } from './git.ts'
+import { stopsAt, type Health } from './instances.ts'
 import type { EventStore } from './store.ts'
 
 export interface ServerOptions {
@@ -13,6 +14,9 @@ export interface ServerOptions {
   cmuxBin: string | null
   store: EventStore
   worktrees(): Worktree[]
+  /** Idle budget in ms (0 = never stop) and the last repo event, for the health report. */
+  idleMs: number
+  lastEventAt(): number
 }
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
@@ -52,6 +56,10 @@ export class PulseServer {
   private readonly clients = new Set<http.ServerResponse>()
   private readonly heartbeat: NodeJS.Timeout
   private stats: { at: number; body: unknown } | null = null
+  readonly startedAt = Date.now()
+  /** When the last page disconnected; `startedAt` until one ever connects. */
+  lastViewerAt = Date.now()
+  private port = 0
 
   private readonly opts: ServerOptions
 
@@ -80,9 +88,14 @@ export class PulseServer {
       this.server.once('error', reject)
       this.server.listen(port, host, () => {
         const addr = this.server.address()
-        resolve(typeof addr === 'object' && addr ? addr.port : port)
+        this.port = typeof addr === 'object' && addr ? addr.port : port
+        resolve(this.port)
       })
     })
+  }
+
+  get viewers(): number {
+    return this.clients.size
   }
 
   close(): void {
@@ -126,9 +139,30 @@ export class PulseServer {
     res.end('not found')
   }
 
-  /** Enough for a second `repo-pulse` on the same repo to recognise this one and reuse it. */
-  private health(): unknown {
-    return { ok: true, name: 'repo-pulse', root: this.opts.root, pid: process.pid }
+  /** Enough for a second `repo-pulse` to recognise this one, and for `repo-pulse ps` to describe it. */
+  private health(): Health {
+    const now = Date.now()
+    const lastEventAt = this.opts.lastEventAt()
+    return {
+      ok: true,
+      name: 'repo-pulse',
+      root: this.opts.root,
+      pid: process.pid,
+      port: this.port,
+      startedAt: this.startedAt,
+      viewers: this.viewers,
+      lastViewerAt: this.lastViewerAt,
+      lastEventAt,
+      idleMs: this.opts.idleMs,
+      stopsAt: stopsAt(
+        now,
+        this.opts.idleMs,
+        this.viewers,
+        this.lastViewerAt,
+        lastEventAt,
+        this.startedAt,
+      ),
+    }
   }
 
   /** Repo-level figures the page cannot derive from live events: 30 days of commit sizes and the file mix. */
@@ -182,7 +216,10 @@ export class PulseServer {
     })
     res.write('retry: 2000\n\n')
     this.clients.add(res)
-    req.on('close', () => this.clients.delete(res))
+    req.on('close', () => {
+      this.clients.delete(res)
+      this.lastViewerAt = Date.now()
+    })
   }
 
   /** Resolves ?wt=&path= to a file in the current snapshot, so only paths git already reports can be diffed. */

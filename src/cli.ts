@@ -2,11 +2,19 @@
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, openSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { commonDir, repoRoot, worktreeId } from './git.ts'
+import {
+  formatDuration,
+  listInstances,
+  parseDuration,
+  readInstance,
+  shouldStop,
+  STATE_DIR,
+  type Instance,
+} from './instances.ts'
 import { PulseServer } from './server.ts'
 import { EventStore } from './store.ts'
 import { RepoWatcher } from './watcher.ts'
@@ -15,22 +23,30 @@ const execFileAsync = promisify(execFile)
 
 const DEFAULT_PORT = 4747
 const DEFAULT_ITEM_PATTERN = '\\b[A-Z]{1,4}-\\d+\\b'
+const DEFAULT_IDLE = '2h'
 const CMUX_DEFAULT = '/Applications/cmux.app/Contents/Resources/bin/cmux'
-const STATE_DIR = path.join(os.homedir(), '.repo-pulse')
-const HEALTH_TIMEOUT_MS = 1500
 const DETACH_WAIT_MS = 8000
+const IDLE_CHECK_MS = 60_000
 
 const HELP = `repo-pulse [path] [options]
+repo-pulse ps | --stop | --stop-all
 
 Live activity feed for a git repo: every edit, its size, and the diff.
 Run it from any directory inside a repo. It keeps running in the background
-after the terminal closes; stop it with --stop. Inside cmux the page opens as
-a browser tab in the pane you ran it from; elsewhere in your default browser.
+after the terminal closes, and stops itself once the repo has been quiet and
+no page has been open for the idle time. Inside cmux the page opens as a
+browser tab in the pane you ran it from; elsewhere in your default browser.
 Running it again for a repo that already has a feed just opens that feed.
 
+Commands:
+  ps               List running instances
+  --stop           Stop the instance for this repo
+  --stop-all       Stop every instance
+
 Options:
+  --idle <time>    Stop after this long with no viewer and no repo activity
+                   (default ${DEFAULT_IDLE}; e.g. 30m, 6h, 1d; "off" to run forever)
   -f, --foreground Run attached to this terminal (logs here, Ctrl-C stops it)
-  --stop           Stop the background instance for this repo
   --no-open        Do not open the page
   --no-focus       Open the page without switching to it
   --port <n>       Port to listen on (default ${DEFAULT_PORT}, or the next free one; 0 picks any)
@@ -45,17 +61,10 @@ interface Options {
   open: boolean
   focus: boolean
   detach: boolean
-  stop: boolean
+  command: 'run' | 'stop' | 'stop-all' | 'ps'
+  idleMs: number
   itemPattern: string
   persist: boolean
-}
-
-/** What a running instance leaves behind so a later `repo-pulse` for the same repo can find it. */
-interface Instance {
-  pid: number
-  port: number
-  root: string
-  startedAt: number
 }
 
 function fail(msg: string, code = 2): never {
@@ -70,7 +79,8 @@ function parseArgs(argv: string[]): Options {
     open: true,
     focus: true,
     detach: true,
-    stop: false,
+    command: 'run',
+    idleMs: parseDuration(DEFAULT_IDLE) ?? 0,
     itemPattern: DEFAULT_ITEM_PATTERN,
     persist: true,
   }
@@ -79,13 +89,19 @@ function parseArgs(argv: string[]): Options {
     if (arg === '-h' || arg === '--help') {
       process.stdout.write(HELP)
       process.exit(0)
-    } else if (arg === '--port') opts.port = Number(argv[++i] ?? NaN)
-    else if (arg === '--open') opts.open = true
+    } else if (arg === 'ps' || arg === '--ps' || arg === '--list') opts.command = 'ps'
+    else if (arg === '--stop') opts.command = 'stop'
+    else if (arg === '--stop-all') opts.command = 'stop-all'
+    else if (arg === '--port') opts.port = Number(argv[++i] ?? NaN)
+    else if (arg === '--idle') {
+      const ms = parseDuration(argv[++i] ?? '')
+      if (ms === null) fail('--idle wants a time like 30m, 2h, 1d, or off')
+      opts.idleMs = ms
+    } else if (arg === '--open') opts.open = true
     else if (arg === '--no-open') opts.open = false
     else if (arg === '--no-focus') opts.focus = false
     else if (arg === '-d' || arg === '--detach') opts.detach = true
     else if (arg === '-f' || arg === '--foreground') opts.detach = false
-    else if (arg === '--stop') opts.stop = true
     else if (arg === '--items') opts.itemPattern = argv[++i] ?? DEFAULT_ITEM_PATTERN
     else if (arg === '--no-persist') opts.persist = false
     else if (arg.startsWith('-')) fail(`unknown option ${arg}\n${HELP}`)
@@ -151,40 +167,55 @@ async function openUrl(url: string, cmuxBin: string | null, focus: boolean): Pro
   child.on('error', (err) => console.error('repo-pulse: could not open browser', err.message))
 }
 
-// --- instance registry ----------------------------------------------------------
+// --- commands ----------------------------------------------------------------------
 
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
+const rel = (ts: number, now: number) => `${formatDuration(now - ts)} ago`
+
+async function ps(): Promise<void> {
+  const list = await listInstances()
+  if (!list.length) {
+    process.stdout.write('no repo-pulse instances running\n')
+    return
   }
-}
-
-async function health(port: number): Promise<{ root: string; pid: number } | null> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
-      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+  const now = Date.now()
+  const rows = list
+    .sort((a, b) => a.root.localeCompare(b.root))
+    .map((i) => {
+      const h = i.health
+      const old = h.viewers === undefined // an instance from a build before idle stop
+      const activity = h.lastEventAt ? rel(h.lastEventAt, now) : 'none yet'
+      const stop = old
+        ? 'never (older build; restart it)'
+        : h.viewers > 0
+          ? 'while a page is open'
+          : h.stopsAt === null
+            ? 'never (idle off)'
+            : `in ${formatDuration(Math.max(0, h.stopsAt - now))}`
+      return [
+        path.basename(i.root),
+        `http://127.0.0.1:${i.port}/`,
+        String(i.pid),
+        `up ${formatDuration(now - (h.startedAt ?? i.startedAt))}`,
+        old ? '? viewers' : `${h.viewers} viewer${h.viewers === 1 ? '' : 's'}`,
+        `activity ${activity}`,
+        `stops ${stop}`,
+      ]
     })
-    if (!res.ok) return null
-    const body = (await res.json()) as { name?: string; root?: string; pid?: number }
-    return body.name === 'repo-pulse' && body.root && body.pid
-      ? { root: body.root, pid: body.pid }
-      : null
-  } catch {
-    return null
-  }
+  const widths = rows[0]!.map((_, c) => Math.max(...rows.map((r) => r[c]!.length)))
+  for (const r of rows)
+    process.stdout.write(r.map((v, c) => v.padEnd(widths[c]!)).join('  ') + '\n')
 }
 
-async function readInstance(file: string): Promise<Instance | null> {
-  try {
-    const inst = JSON.parse(await readFile(file, 'utf8')) as Instance
-    if (!alive(inst.pid)) return null
-    const h = await health(inst.port)
-    return h && h.pid === inst.pid ? inst : null
-  } catch {
-    return null
+async function stopAll(): Promise<void> {
+  const list = await listInstances()
+  if (!list.length) {
+    process.stdout.write('no repo-pulse instances running\n')
+    return
+  }
+  for (const i of list) {
+    process.kill(i.pid, 'SIGTERM')
+    await rm(path.join(STATE_DIR, i.dir, 'server.json'), { force: true })
+    process.stdout.write(`stopped ${path.basename(i.root)} (pid ${i.pid})\n`)
   }
 }
 
@@ -192,6 +223,9 @@ async function readInstance(file: string): Promise<Instance | null> {
 
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2))
+  if (opts.command === 'ps') return ps()
+  if (opts.command === 'stop-all') return stopAll()
+
   let root: string
   let common: string
   try {
@@ -207,7 +241,7 @@ async function main(): Promise<void> {
   const instanceFile = path.join(stateDir, 'server.json')
   const cmuxBin = findCmux()
 
-  if (opts.stop) {
+  if (opts.command === 'stop') {
     const inst = await readInstance(instanceFile)
     if (!inst) return fail(`no repo-pulse is running for ${repoName}`, 1)
     process.kill(inst.pid, 'SIGTERM')
@@ -229,12 +263,15 @@ async function main(): Promise<void> {
   const logPath = opts.persist ? path.join(stateDir, 'events.jsonl') : null
   const store = new EventStore(logPath)
   await store.load()
+  let lastEventAt = 0
 
   const watcher = new RepoWatcher(root, {
     onEvents: (events) => {
       for (const ev of events) {
         const filed = store.add(ev)
         if (filed) server.broadcast(filed.type, filed, filed.id)
+        // Commits replayed from history at start are not "activity now".
+        if (filed && ev.ts > lastEventAt && ev.ts > server.startedAt - 60_000) lastEventAt = ev.ts
       }
     },
     onSnapshot: (snapshot) => {
@@ -253,13 +290,15 @@ async function main(): Promise<void> {
     cmuxBin,
     store,
     worktrees: () => watcher.worktrees(),
+    idleMs: opts.idleMs,
+    lastEventAt: () => lastEventAt,
   })
 
   await watcher.start()
   const port = await listen(server, opts.port)
   const url = `http://127.0.0.1:${port}/`
   await mkdir(stateDir, { recursive: true })
-  const inst: Instance = { pid: process.pid, port, root, startedAt: Date.now() }
+  const inst: Instance = { pid: process.pid, port, root, startedAt: server.startedAt }
   await writeFile(instanceFile, JSON.stringify(inst))
 
   const wts = watcher.worktrees()
@@ -268,21 +307,44 @@ async function main(): Promise<void> {
     `watching ${wts.length} worktree${wts.length === 1 ? '' : 's'}: ${wts.map((w) => w.branch ?? w.head?.slice(0, 7) ?? '?').join(', ')}\n`,
   )
   if (logPath) process.stdout.write(`edit log: ${logPath}\n`)
+  process.stdout.write(
+    opts.idleMs
+      ? `stops after ${formatDuration(opts.idleMs)} with no viewer and no activity\n`
+      : 'idle stop is off\n',
+  )
   if (opts.open) await openUrl(url, cmuxBin, opts.focus)
 
   let stopping = false
-  const shutdown = (): void => {
+  const shutdown = (why: string): void => {
     if (stopping) return
     stopping = true
+    process.stdout.write(`repo-pulse: stopping (${why})\n`)
     watcher.stop()
     server.close()
     Promise.allSettled([store.flush(), rm(instanceFile, { force: true })]).finally(() =>
       process.exit(0),
     )
   }
-  process.on('SIGINT', shutdown)
-  process.on('SIGTERM', shutdown)
-  process.on('SIGHUP', shutdown)
+  process.on('SIGINT', () => shutdown('interrupted'))
+  process.on('SIGTERM', () => shutdown('stopped'))
+  process.on('SIGHUP', () => shutdown('terminal closed'))
+
+  // Nobody watching and nothing happening for the idle budget: leave quietly. A deleted
+  // repo directory is the other reason to go.
+  setInterval(() => {
+    if (!existsSync(root)) return shutdown('repo directory is gone')
+    if (
+      shouldStop(
+        Date.now(),
+        opts.idleMs,
+        server.viewers,
+        server.lastViewerAt,
+        lastEventAt,
+        server.startedAt,
+      )
+    )
+      shutdown(`idle for ${formatDuration(opts.idleMs)} with no viewer`)
+  }, IDLE_CHECK_MS).unref()
 }
 
 /** The default port, then any free one; an explicit --port is honoured or fails loudly. */
@@ -330,7 +392,12 @@ async function detach(
     if (inst && inst.pid === child.pid) {
       const url = `http://127.0.0.1:${inst.port}/`
       process.stdout.write(`repo-pulse running in the background (pid ${inst.pid}) at ${url}\n`)
-      process.stdout.write(`log: ${logFile}\nstop with: repo-pulse --stop\n`)
+      process.stdout.write(
+        opts.idleMs
+          ? `stops on its own after ${formatDuration(opts.idleMs)} with no viewer and no activity; `
+          : 'runs until stopped; ',
+      )
+      process.stdout.write(`repo-pulse --stop ends it, repo-pulse ps lists all\nlog: ${logFile}\n`)
       if (opts.open) await openUrl(url, cmuxBin, opts.focus)
       return
     }

@@ -5,13 +5,16 @@ the diff one click away.
 
 ```sh
 cd ~/dev/some-repo
-repo-pulse        # opens the feed: a cmux browser tab in your pane, or your default browser
-repo-pulse -d     # same, but runs in the background and gives the terminal back
-repo-pulse --stop # stop the background instance for this repo
+repo-pulse            # starts in the background and opens the feed: a cmux tab, or your browser
+repo-pulse ps         # every running instance: url, viewers, last activity, when it will stop
+repo-pulse --stop     # stop this repo's instance; --stop-all stops every one
+repo-pulse -f         # run attached to the terminal instead (logs there, Ctrl-C stops it)
 ```
 
-Run it from anywhere inside a repo. Running it again for a repo that already has a feed just
-opens that feed; a second repo gets the next free port. Rows appear as files change. Click a
+Run it from anywhere inside a repo. It survives the terminal closing, and it stops itself once
+the repo has been quiet and no page has been open for two hours (`--idle 6h`, `--idle off`),
+so forgotten instances do not pile up. Running it again for a repo that already has a feed
+just opens that feed; a second repo gets the next free port. Rows appear as files change. Click a
 row for the diff, `j`/`k` to move, `Enter` to open, `Esc` to close, `/` to filter, `1`–`5` to
 pick a window, `g` to jump to the top, `s` to switch between the feed and the stats view. New
 rows queue behind a pill while you are scrolled into history. Commits in the window are rolled
@@ -39,14 +42,15 @@ Requires Node 24+ and git. No runtime dependencies.
 
 ## Options
 
-| Flag                 | Meaning                                                   |
-| -------------------- | --------------------------------------------------------- |
-| `-f`, `--foreground` | Run attached to the terminal instead of in the background |
-| `--no-open`          | Don't open the page                                       |
-| `--no-focus`         | Open the page without switching to it                     |
-| `--port <n>`         | Port (default 4747 or the next free one; `0` picks any)   |
-| `--items <regex>`    | Work-item id pattern for commit roll-ups                  |
-| `--no-persist`       | Don't keep the edit log under `~/.repo-pulse`             |
+| Flag                 | Meaning                                                                         |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `--idle <time>`      | Stop after this long with no viewer and no activity (default `2h`; `off` never) |
+| `-f`, `--foreground` | Run attached to the terminal instead of in the background                       |
+| `--no-open`          | Don't open the page                                                             |
+| `--no-focus`         | Open the page without switching to it                                           |
+| `--port <n>`         | Port (default 4747 or the next free one; `0` picks any)                         |
+| `--items <regex>`    | Work-item id pattern for commit roll-ups                                        |
+| `--no-persist`       | Don't keep the edit log under `~/.repo-pulse`                                   |
 
 State lives under `~/.repo-pulse/<repo>-<id>/`: `events.jsonl` (edits and HEAD moves, kept for
 7 days), `server.json` (the running instance), and `server.log` when detached.
