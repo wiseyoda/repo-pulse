@@ -1,0 +1,29 @@
+{
+  "name": "repo-pulse",
+  "version": "0.1.0",
+  "description": "Live activity feed for a git repo: every edit, its size, and the diff, as agents make them.",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@12.4.2",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "repo-pulse": "bin/repo-pulse"
+  },
+  "scripts": {
+    "start": "node src/cli.ts",
+    "dev": "node --watch src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "prettier --check .",
+    "format": "prettier --write .",
+    "verify": "pnpm typecheck && pnpm lint && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
