@@ -1,0 +1,24 @@
+name: Bug report
+description: Something does not behave as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you saw. Screenshots welcome.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Versions
+      placeholder: 'repo-pulse commit or tag · node --version · git --version · macOS/Linux'
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Server log
+      description: '`~/.repo-pulse/<repo>-<id>/server.log`, or the terminal output with `-f`.'
+      render: text

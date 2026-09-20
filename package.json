@@ -2,8 +2,28 @@
   "name": "repo-pulse",
   "version": "0.1.0",
   "description": "Live activity feed for a git repo: every edit, its size, and the diff, as agents make them.",
+  "keywords": [
+    "git",
+    "activity",
+    "feed",
+    "diff",
+    "agents",
+    "watcher",
+    "dashboard",
+    "cmux",
+    "sse"
+  ],
+  "license": "MIT",
+  "author": "wiseyoda",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wiseyoda/repo-pulse.git"
+  },
+  "homepage": "https://github.com/wiseyoda/repo-pulse#readme",
+  "bugs": {
+    "url": "https://github.com/wiseyoda/repo-pulse/issues"
+  },
   "type": "module",
-  "private": true,
   "packageManager": "pnpm@12.4.2",
   "engines": {
     "node": ">=24"
@@ -11,6 +31,13 @@
   "bin": {
     "repo-pulse": "bin/repo-pulse"
   },
+  "files": [
+    "bin",
+    "src",
+    "public",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node src/cli.ts",
     "dev": "node --watch src/cli.ts",

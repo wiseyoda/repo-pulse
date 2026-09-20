@@ -1,0 +1,15 @@
+name: Feature request
+description: Something repo-pulse could show or do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to see or do?
+      description: The situation, not the solution. What would you look at the page to learn?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea, if you have one
