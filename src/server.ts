@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { commitPatch, fileDiff, type Worktree } from './git.ts'
+import { commitPatch, fileDiff, fileMix, readCommits, type Worktree } from './git.ts'
 import type { EventStore } from './store.ts'
 
 export interface ServerOptions {
@@ -20,10 +20,14 @@ const STATIC: Record<string, { file: string; type: string }> = {
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/pulse.js': { file: 'pulse.js', type: 'text/javascript; charset=utf-8' },
   '/lib.js': { file: 'lib.js', type: 'text/javascript; charset=utf-8' },
+  '/md.js': { file: 'md.js', type: 'text/javascript; charset=utf-8' },
 }
 const HEARTBEAT_MS = 15_000
 const MAX_DIFF_BYTES = 2 * 1024 * 1024
 const SHA_RE = /^[0-9a-f]{7,40}$/
+const STATS_TTL_MS = 60_000
+const STATS_DAYS = 30
+const STATS_MAX_COMMITS = 2000
 
 function isLoopbackHost(host: string | undefined): boolean {
   if (!host) return false
@@ -47,6 +51,7 @@ export class PulseServer {
   readonly server: http.Server
   private readonly clients = new Set<http.ServerResponse>()
   private readonly heartbeat: NodeJS.Timeout
+  private stats: { at: number; body: unknown } | null = null
 
   private readonly opts: ServerOptions
 
@@ -111,7 +116,10 @@ export class PulseServer {
     if (method === 'GET' && url.pathname === '/events') return this.stream(req, res)
     if (method === 'GET' && url.pathname === '/api/state') return this.json(res, this.state())
     if (method === 'GET' && url.pathname === '/api/health') return this.json(res, this.health())
+    if (method === 'GET' && url.pathname === '/api/stats')
+      return this.json(res, await this.repoStats())
     if (method === 'GET' && url.pathname === '/api/diff') return this.diff(url, res)
+    if (method === 'GET' && url.pathname === '/api/file') return this.file(url, res)
     if (method === 'GET' && url.pathname === '/api/commit') return this.commit(url, res)
     if (method === 'POST' && url.pathname === '/api/cmux-diff') return this.cmuxDiff(url, res)
     res.writeHead(404, { 'content-type': 'text/plain' })
@@ -121,6 +129,24 @@ export class PulseServer {
   /** Enough for a second `repo-pulse` on the same repo to recognise this one and reuse it. */
   private health(): unknown {
     return { ok: true, name: 'repo-pulse', root: this.opts.root, pid: process.pid }
+  }
+
+  /** Repo-level figures the page cannot derive from live events: 30 days of commit sizes and the file mix. */
+  private async repoStats(): Promise<unknown> {
+    if (this.stats && Date.now() - this.stats.at < STATS_TTL_MS) return this.stats.body
+    const root = this.opts.root
+    const [commits, files] = await Promise.all([
+      readCommits(root, ['-n', String(STATS_MAX_COMMITS), `--since=${STATS_DAYS} days ago`]),
+      fileMix(root),
+    ])
+    const body = {
+      days: STATS_DAYS,
+      commits: commits.map((c) => ({ sha: c.sha, ts: c.ts, added: c.added, deleted: c.deleted })),
+      files,
+      at: Date.now(),
+    }
+    this.stats = { at: Date.now(), body }
+    return body
   }
 
   private state(): unknown {
@@ -172,6 +198,22 @@ export class PulseServer {
     const hit = this.lookup(url)
     if (!hit) return this.text(res, 'No such file in the current working tree.', 404)
     this.text(res, await fileDiff(hit.wt.path, hit.file))
+  }
+
+  /** Current working-tree contents of a file git reports as changed; the page renders markdown from it. */
+  private async file(url: URL, res: http.ServerResponse): Promise<void> {
+    const hit = this.lookup(url)
+    if (!hit) return this.text(res, 'No such file in the current working tree.', 404)
+    if (hit.file.status === 'deleted') return this.text(res, 'File was deleted.', 404)
+    const abs = path.join(hit.wt.path, hit.file.path)
+    if (!abs.startsWith(hit.wt.path + path.sep)) return this.text(res, 'Bad request.', 400)
+    try {
+      const buf = await readFile(abs)
+      if (buf.subarray(0, 8000).includes(0)) return this.text(res, 'Binary file.', 415)
+      this.text(res, buf.toString('utf8'))
+    } catch {
+      this.text(res, 'Could not read the file.', 404)
+    }
   }
 
   private async commit(url: URL, res: http.ServerResponse): Promise<void> {

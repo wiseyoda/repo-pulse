@@ -1,12 +1,23 @@
 import {
+  bucketActivity,
+  bucketFor,
+  churnBy,
+  commitTypes,
+  compact,
+  extMix,
   feedTotals,
+  isTestPath,
   magnitudeWidth,
   mergeFeed,
   numberDiff,
   relativeTime,
   rollupCommits,
+  sizeTrend,
   splitPath,
+  tempo,
+  testShare,
 } from './lib.js'
+import { marksFromDiff, renderMarkdown } from './md.js'
 
 const HOT_MS = 60_000
 const HEAT_MS = 15 * 60_000
@@ -24,6 +35,7 @@ const state = {
   edits: [],
   commits: [],
   heads: [],
+  samples: [],
   snapshots: new Map(),
   lastTouch: new Map(), // `${wt}\0${path}` -> ts of last edit event
   seen: new Set(),
@@ -31,6 +43,9 @@ const state = {
   filter: '',
   wtFilter: null,
   panel: 'feed',
+  view: 'feed',
+  mdMode: 'rendered',
+  repoStats: null, // { at, days, commits, files } from /api/stats
   selectedKey: null,
   flashIds: new Set(),
   pending: 0, // live rows not yet rendered because the reader has scrolled down
@@ -51,6 +66,10 @@ const els = {
   window: $('window'),
   filter: $('filter'),
   tabs: $('tabs'),
+  view: $('view'),
+  stats: $('panel-stats'),
+  tip: $('tip'),
+  grid: document.querySelector('.grid'),
   tabFeed: $('tab-feed'),
   tabTree: $('tab-tree'),
   tabItems: $('tab-items'),
@@ -70,6 +89,9 @@ const els = {
   drawerFiles: $('drawer-files'),
   cmuxBtn: $('cmux-btn'),
   drawerClose: $('drawer-close'),
+  wrapBtn: $('wrap-btn'),
+  mode: $('mode'),
+  prose: $('prose'),
   diff: $('diff'),
 }
 
@@ -116,8 +138,9 @@ function ingest(ev, { live = false } = {}) {
     state.edits.push(ev)
     state.lastTouch.set(touchKey(ev.wt, ev.path), ev.ts)
   } else if (ev.type === 'commit') state.commits.push(ev)
+  else if (ev.type === 'sample') state.samples.push(ev)
   else state.heads.push(ev)
-  if (live) {
+  if (live && ev.type !== 'sample') {
     state.flashIds.add(ev.id)
     state.lastEventAt = ev.ts
   }
@@ -133,11 +156,13 @@ function replaceState(s) {
   state.edits = []
   state.commits = []
   state.heads = []
+  state.samples = []
   state.seen = new Set()
   state.lastTouch = new Map()
   for (const e of s.edits) ingest(e)
   for (const c of s.commits) ingest(c)
   for (const hd of s.heads) ingest(hd)
+  for (const sm of s.samples) ingest(sm)
   state.snapshots = new Map(s.snapshots.map((sn) => [sn.wt.id, sn]))
   state.lastEventAt = Math.max(
     0,
@@ -186,6 +211,7 @@ function flush() {
   if (parts.has('tree')) renderTree()
   if (parts.has('items')) renderItems()
   if (parts.has('status')) renderStatus()
+  if (parts.has('stats') && state.view === 'stats') renderStats()
 }
 // One render per frame however many events arrive. Frames stop in a background tab, so a
 // timer takes over there and the page is current the moment it is shown again.
@@ -196,7 +222,7 @@ function invalidate(...parts) {
   if (document.hidden) setTimeout(flush, 0)
   else requestAnimationFrame(flush)
 }
-const renderAll = () => invalidate('header', 'feed', 'tree', 'items', 'status')
+const renderAll = () => invalidate('header', 'feed', 'tree', 'items', 'status', 'stats')
 
 function renderHeader() {
   if (!state.repo) return
@@ -706,6 +732,8 @@ function renderDiff(text) {
   )
 }
 
+const isMarkdown = (p) => /\.(md|markdown|mdx)$/i.test(p)
+
 function showDrawer(title, statsNodes, drawer) {
   state.drawer = drawer
   els.drawerTitle.textContent = title
@@ -713,13 +741,53 @@ function showDrawer(title, statsNodes, drawer) {
   els.drawerStats.replaceChildren(...statsNodes)
   els.cmuxBtn.hidden = !state.cmux
   els.drawerFiles.hidden = true
+  els.mode.hidden = !drawer.markdown
   els.diff.replaceChildren(h('div', { class: 'loading' }, 'Loading diff…'))
+  els.prose.replaceChildren(h('div', { class: 'loading' }, 'Loading…'))
+  applyMode()
   els.drawer.hidden = false
   requestAnimationFrame(() => els.drawer.classList.add('open'))
 }
 
+/** Markdown files open rendered with the diff painted on; the toggle remembers the reader's pick. */
+function applyMode() {
+  const rendered = Boolean(state.drawer?.markdown) && state.mdMode === 'rendered'
+  els.prose.hidden = !rendered
+  els.diff.hidden = rendered
+  els.wrapBtn.hidden = rendered
+  for (const b of els.mode.querySelectorAll('button'))
+    b.classList.toggle('on', b.dataset.mode === state.mdMode)
+}
+
+function setMode(mode) {
+  state.mdMode = mode
+  try {
+    localStorage.setItem('repo-pulse.mdMode', mode)
+  } catch {}
+  applyMode()
+}
+
+function materialize(n) {
+  if (typeof n === 'string') return n
+  return h(n.t, n.a, ...n.c.map(materialize))
+}
+
+function renderProse(text, diffText) {
+  const marks = marksFromDiff(numberDiff(diffText))
+  const nodes = renderMarkdown(text, marks).map(materialize)
+  for (const a of nodes.flatMap((n) => (n.querySelectorAll ? [...n.querySelectorAll('a')] : [])))
+    a.setAttribute('target', '_blank')
+  els.prose.replaceChildren(
+    ...(nodes.length ? nodes : [h('div', { class: 'empty' }, 'Empty file.')]),
+  )
+  const first = els.prose.querySelector('.ins-block, del.gone')
+  els.prose.scrollTop = 0
+  if (first) first.scrollIntoView({ block: 'center' })
+}
+
 function closeDrawer() {
   state.drawer = null
+  if (location.hash.startsWith('#file=')) history.replaceState(null, '', `#${state.view}`)
   els.drawer.classList.remove('open')
   els.drawer.hidden = true
   els.feed.focus({ preventScroll: true })
@@ -736,6 +804,7 @@ function select(key) {
 async function openFile(wt, path, stat, key = null) {
   select(key)
   const label = wtLabel(wt)
+  const markdown = isMarkdown(path) && stat.status !== 'deleted' && stat.kind !== 'deleted'
   showDrawer(
     path,
     [
@@ -745,19 +814,28 @@ async function openFile(wt, path, stat, key = null) {
       ` · ${stat.status ?? stat.kind} vs HEAD`,
       label && ` · ${label}`,
     ],
-    { kind: 'file', wt, path },
+    { kind: 'file', wt, path, markdown },
   )
+  history.replaceState(null, '', `#file=${encodeURIComponent(wt)}:${encodeURIComponent(path)}`)
+  const q = `wt=${encodeURIComponent(wt)}&path=${encodeURIComponent(path)}`
   try {
-    const res = await fetch(
-      `/api/diff?wt=${encodeURIComponent(wt)}&path=${encodeURIComponent(path)}`,
-    )
-    const text = await res.text()
+    const [diffRes, fileRes] = await Promise.all([
+      fetch(`/api/diff?${q}`),
+      markdown ? fetch(`/api/file?${q}`) : null,
+    ])
+    const text = await diffRes.text()
     if (state.drawer?.path !== path) return
-    if (res.ok) renderDiff(text)
+    if (diffRes.ok) renderDiff(text)
     else
       els.diff.replaceChildren(
         h('div', { class: 'err' }, text || 'This file no longer differs from HEAD.'),
       )
+    if (fileRes) {
+      const body = await fileRes.text()
+      if (state.drawer?.path !== path) return
+      if (fileRes.ok) renderProse(body, diffRes.ok ? text : '')
+      else els.prose.replaceChildren(h('div', { class: 'err' }, body))
+    }
   } catch (err) {
     if (state.drawer?.path === path)
       els.diff.replaceChildren(
@@ -816,6 +894,525 @@ async function openInCmux() {
   }
 }
 
+// --- stats -------------------------------------------------------------------
+
+const SVG_NS = 'http://www.w3.org/2000/svg'
+function svg(tag, attrs = {}, ...children) {
+  const el = document.createElementNS(SVG_NS, tag)
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === undefined || v === null || v === false) continue
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v)
+    else el.setAttribute(k, v)
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined || c === false) continue
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)))
+  }
+  return el
+}
+
+function showTip(x, y, ...nodes) {
+  els.tip.replaceChildren(...nodes)
+  els.tip.hidden = false
+  const w = els.tip.offsetWidth
+  els.tip.style.left = `${Math.min(innerWidth - w / 2 - 8, Math.max(w / 2 + 8, x))}px`
+  els.tip.style.top = `${y}px`
+}
+const hideTip = () => (els.tip.hidden = true)
+
+const fmtDur = (ms) => {
+  const m = Math.round(ms / 60_000)
+  if (m < 1) return `${Math.round(ms / 1000)}s`
+  if (m < 60) return `${m}m`
+  const hh = Math.floor(m / 60)
+  return m % 60 ? `${hh}h ${m % 60}m` : `${hh}h`
+}
+const fmtClock = (ts) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+const fmtDay = (ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })
+const fmtTick = (ts, spanMs) =>
+  spanMs > 2 * 86_400_000
+    ? fmtDay(ts)
+    : spanMs > 86_400_000
+      ? `${fmtDay(ts)} ${fmtClock(ts)}`
+      : fmtClock(ts)
+const pct = (x) => `${Math.round(x * 100)}%`
+
+function statsRows() {
+  const from = since()
+  const edits = state.edits.filter((e) => e.ts >= from && inWt(e.wt) && matches(e.path))
+  const commits = state.commits.filter(
+    (c) => c.ts >= from && inWt(c.wt) && matches(`${c.commit.subject} ${c.commit.sha}`),
+  )
+  return { from, edits, commits }
+}
+
+function tile(label, value, hint, spark) {
+  return h(
+    'div',
+    { class: 'tile' },
+    h('div', { class: 'label' }, label),
+    h('div', { class: 'value' }, value),
+    hint && h('div', { class: 'hint' }, hint),
+    spark,
+  )
+}
+
+function card(title, sub, cls, ...body) {
+  return h(
+    'div',
+    { class: `card ${cls}` },
+    h('h3', {}, title, sub && h('span', { class: 'sub' }, sub)),
+    ...body,
+  )
+}
+
+function sparkline(values, w = 120, hgt = 22) {
+  const max = Math.max(1, ...values)
+  const n = values.length
+  if (n < 2) return null
+  const pts = values.map(
+    (v, i) => `${((i / (n - 1)) * w).toFixed(1)},${(hgt - 1 - (v / max) * (hgt - 2)).toFixed(1)}`,
+  )
+  return svg(
+    'svg',
+    {
+      class: 'spark chart',
+      viewBox: `0 0 ${w} ${hgt}`,
+      preserveAspectRatio: 'none',
+      'aria-hidden': 'true',
+    },
+    svg('path', { class: 'area', d: `M0,${hgt} L${pts.join(' L')} L${w},${hgt} Z` }),
+    svg('path', { class: 'line', d: `M${pts.join(' L')}`, 'vector-effect': 'non-scaling-stroke' }),
+  )
+}
+
+/** Diverging columns: lines added above the baseline, deleted below, commits as dots on it. */
+/** Card inner width for a span of the 12-column grid, so charts draw at the pixels they get. */
+function cardWidth(span) {
+  const pad = innerWidth <= 960 ? 24 : 32
+  const cols = Math.max(300, els.stats.clientWidth - pad)
+  return Math.max(260, ((cols + 12) * span) / 12 - 12 - 30)
+}
+
+function activityChart(buckets, bucketMs) {
+  const W = cardWidth(12)
+  const H = 150
+  const padL = 34
+  const padB = 18
+  const mid = (H - padB) / 2
+  const n = buckets.length
+  const slot = (W - padL) / n
+  const bw = Math.min(24, Math.max(1, slot - 2))
+  const max = Math.max(1, ...buckets.map((b) => Math.max(b.added, b.deleted)))
+  const scale = (v) => (v / max) * (mid - 6)
+  const spanMs = n * bucketMs
+  const ticks = []
+  const every = Math.max(1, Math.round(n / 6))
+  for (let i = 0; i < n; i += every) ticks.push(i)
+  const rows = buckets.map((b, i) => {
+    const x = padL + i * slot + (slot - bw) / 2
+    const cx = padL + i * slot + slot / 2
+    const up = scale(b.added)
+    const down = scale(b.deleted)
+    return svg(
+      'g',
+      {
+        onmousemove: (ev) =>
+          showTip(
+            ev.clientX,
+            ev.clientY,
+            h('div', {}, `${fmtTick(b.t, spanMs)} · ${fmtDur(bucketMs)}`),
+            h(
+              'div',
+              {},
+              h('span', { class: 'a' }, `+${b.added}`),
+              ' ',
+              h('span', { class: 'd' }, `−${b.deleted}`),
+              ` · ${plural(b.edits, 'edit')} · ${plural(b.commits, 'commit')}`,
+            ),
+          ),
+        onmouseleave: hideTip,
+      },
+      svg('rect', { class: 'hit', x: padL + i * slot, y: 0, width: slot, height: H - padB }),
+      up > 0 &&
+        svg('rect', {
+          class: 'add',
+          x,
+          y: mid - up,
+          width: bw,
+          height: up,
+          rx: Math.min(2, bw / 2),
+        }),
+      down > 0 &&
+        svg('rect', {
+          class: 'del',
+          x,
+          y: mid + 1,
+          width: bw,
+          height: down,
+          rx: Math.min(2, bw / 2),
+        }),
+      b.commits > 0 && svg('circle', { class: 'commit', cx, cy: mid, r: 3.5 }),
+    )
+  })
+  return svg(
+    'svg',
+    {
+      class: 'chart',
+      viewBox: `0 0 ${W} ${H}`,
+      height: H,
+      role: 'img',
+      'aria-label': 'Lines added and deleted over time',
+    },
+    svg('line', { class: 'grid-line', x1: padL, x2: W, y1: mid, y2: mid }),
+    svg('text', { class: 'axis', x: padL - 6, y: 10, 'text-anchor': 'end' }, `+${compact(max)}`),
+    svg(
+      'text',
+      { class: 'axis', x: padL - 6, y: H - padB - 2, 'text-anchor': 'end' },
+      `−${compact(max)}`,
+    ),
+    ...ticks.map((i) =>
+      svg('text', { class: 'axis', x: padL + i * slot, y: H - 4 }, fmtTick(buckets[i].t, spanMs)),
+    ),
+    ...rows,
+  )
+}
+
+/** A single-series line with a wash under it, hover reads the nearest point. */
+function lineChart(points, { label, fmt = compact, cols = 6 } = {}) {
+  const W = cardWidth(cols)
+  const H = 130
+  const padL = 40
+  const padB = 18
+  if (points.length < 2)
+    return h('div', { class: 'empty', style: 'padding:24px 0' }, 'Not enough history yet.')
+  const t0 = points[0].ts
+  const t1 = points[points.length - 1].ts
+  const span = Math.max(1, t1 - t0)
+  const lo = Math.min(...points.map((p) => p.v))
+  const hi = Math.max(...points.map((p) => p.v))
+  const range = Math.max(1, hi - lo)
+  const x = (ts) => padL + ((ts - t0) / span) * (W - padL - 4)
+  const y = (v) => 8 + (1 - (v - lo) / range) * (H - padB - 14)
+  let d = ''
+  points.forEach((p, i) => {
+    d +=
+      i === 0
+        ? `M${x(p.ts).toFixed(1)},${y(p.v).toFixed(1)}`
+        : ` L${x(p.ts).toFixed(1)},${y(p.v).toFixed(1)}`
+  })
+  const last = points[points.length - 1]
+  const ticks = [0, 0.5, 1].map((f) => t0 + f * span)
+  const nearest = (ev, svgEl) => {
+    const rect = svgEl.getBoundingClientRect()
+    const ts = t0 + ((ev.clientX - rect.left) / rect.width) * span
+    let best = points[0]
+    for (const p of points) if (Math.abs(p.ts - ts) < Math.abs(best.ts - ts)) best = p
+    return best
+  }
+  const el = svg(
+    'svg',
+    { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': label },
+    svg('line', { class: 'grid-line', x1: padL, x2: W, y1: y(lo), y2: y(lo) }),
+    svg('line', { class: 'grid-line', x1: padL, x2: W, y1: y(hi), y2: y(hi) }),
+    svg('text', { class: 'axis', x: padL - 6, y: y(hi) + 3, 'text-anchor': 'end' }, fmt(hi)),
+    svg('text', { class: 'axis', x: padL - 6, y: y(lo) + 3, 'text-anchor': 'end' }, fmt(lo)),
+    svg('path', {
+      class: 'area',
+      d: `${d} L${x(t1).toFixed(1)},${H - padB} L${padL},${H - padB} Z`,
+    }),
+    svg('path', { class: 'line', d }),
+    svg('circle', { class: 'dot', cx: x(last.ts), cy: y(last.v), r: 4 }),
+    ...ticks.map((ts, i) =>
+      svg(
+        'text',
+        {
+          class: 'axis',
+          x: x(ts),
+          y: H - 4,
+          'text-anchor': i === 0 ? 'start' : i === 2 ? 'end' : 'middle',
+        },
+        fmtTick(ts, span),
+      ),
+    ),
+    svg('rect', {
+      class: 'hit',
+      x: padL,
+      y: 0,
+      width: W - padL,
+      height: H - padB,
+      onmousemove: (ev) => {
+        const p = nearest(ev, el)
+        showTip(
+          ev.clientX,
+          ev.clientY,
+          h('div', {}, fmtTick(p.ts, span)),
+          h('div', {}, p.tip ?? fmt(p.v)),
+        )
+      },
+      onmouseleave: hideTip,
+    }),
+  )
+  return el
+}
+
+function barList(rows, { name, value, max, cls = () => '' }) {
+  const top = Math.max(1, ...rows.map(max))
+  return h(
+    'div',
+    { class: 'bars' },
+    ...rows.flatMap((r) => [
+      h(
+        'div',
+        { class: 'name', title: name(r) },
+        h('i', {
+          class: `track ${cls(r) ?? ''}`,
+          style: `width:${Math.max(2, (max(r) / top) * 120).toFixed(0)}px`,
+        }),
+        h('span', {}, name(r)),
+      ),
+      h('div', { class: 'n' }, value(r)),
+    ]),
+  )
+}
+
+// One hue, light to dark, for the part-to-whole file mix; gray closes it as "other".
+const MIX_STEPS = ['#1f6feb', '#388bfd', '#58a6ff', '#79c0ff', '#a5d6ff', '#8b9098']
+const TEST_COLORS = ['var(--commit)', 'var(--mod)']
+
+function stack(parts, colorOf) {
+  return h(
+    'div',
+    { class: 'stack' },
+    ...parts.map((p, i) =>
+      h('i', {
+        style: `flex:${p.share.toFixed(4)};background:${colorOf(p, i)}`,
+        title: `${p.label} ${pct(p.share)}`,
+      }),
+    ),
+  )
+}
+function legend(parts, colorOf) {
+  return h(
+    'div',
+    { class: 'legend' },
+    ...parts.map((p, i) =>
+      h('span', {}, h('i', { style: `background:${colorOf(p, i)}` }), `${p.label} ${pct(p.share)}`),
+    ),
+  )
+}
+
+/** Uncommitted lines over time: the latest sample per worktree, summed at every sample time. */
+function uncommittedSeries(from) {
+  const latest = new Map()
+  const out = []
+  const samples = state.samples.filter((s) => inWt(s.wt)).sort((a, b) => a.ts - b.ts)
+  for (const s of samples) {
+    latest.set(s.wt, s)
+    if (s.ts < from) continue
+    let added = 0
+    let deleted = 0
+    let files = 0
+    for (const l of latest.values()) {
+      added += l.added
+      deleted += l.deleted
+      files += l.files
+    }
+    out.push({
+      ts: s.ts,
+      v: added + deleted,
+      tip: `+${added} −${deleted} across ${plural(files, 'file')}`,
+    })
+  }
+  return out
+}
+
+const emptyNote = (text) => h('div', { class: 'empty', style: 'padding:16px 0' }, text)
+
+function renderStats() {
+  if (!state.loaded) return
+  const t = now()
+  const { from, edits, commits } = statsRows()
+  const oldest = Math.min(t, ...edits.map((e) => e.ts), ...commits.map((c) => c.ts))
+  const windowMs = state.window || Math.max(60_000, t - oldest)
+  const start = state.window ? from : t - windowMs
+  const bucketMs = bucketFor(windowMs)
+  const buckets = bucketActivity(edits, commits, start, t, bucketMs)
+  const sum = feedTotals(edits)
+  const tp = tempo(edits, commits, start, t)
+  const ts = testShare(edits)
+  const files = new Set(edits.map((e) => e.path)).size
+  let unAdded = 0
+  let unDeleted = 0
+  let unFiles = 0
+  for (const sn of state.snapshots.values()) {
+    if (!inWt(sn.wt.id)) continue
+    for (const f of sn.files) {
+      unAdded += f.added
+      unDeleted += f.deleted
+      unFiles++
+    }
+  }
+  const windowMinutes = Math.max(1, Math.round(windowMs / 60_000))
+  const rs = state.repoStats
+  const trend = rs
+    ? sizeTrend(rs.commits).map((p) => ({
+        ts: p.ts,
+        v: p.net,
+        tip: `${p.net >= 0 ? '+' : ''}${p.net.toLocaleString()} lines net · ${p.sha.slice(0, 7)}`,
+      }))
+    : []
+  const trendDelta = trend.length ? trend[trend.length - 1].v : 0
+  const mix = rs ? extMix(rs.files.byExt, 5).map((m) => ({ ...m, label: `.${m.ext}` })) : []
+  const testParts = [
+    { label: 'tests', share: ts.share },
+    { label: 'source', share: 1 - ts.share },
+  ]
+  const busiest = tp.busiest.edits
+    ? `${fmtClock(tp.busiest.minute)} · ${plural(tp.busiest.edits, 'edit')}`
+    : ''
+  const label = labelForWindow()
+  const signed = (n) => `${n >= 0 ? '+' : ''}${compact(n)}`
+  const halfSpan = innerWidth <= 960 ? 12 : 6
+
+  els.stats.replaceChildren(
+    h(
+      'div',
+      { class: 'tiles' },
+      tile(
+        'Active minutes',
+        [String(tp.activeMinutes), state.window ? h('small', {}, `of ${windowMinutes}`) : null],
+        busiest ? `busiest ${busiest}` : 'no activity yet',
+      ),
+      tile(
+        'Edits',
+        compact(sum.edits),
+        files ? `${plural(files, 'file')} touched` : '',
+        sparkline(buckets.map((b) => b.edits)),
+      ),
+      tile(
+        'Commits',
+        compact(commits.length),
+        commits.length ? `last ${relativeTime(Math.max(...commits.map((c) => c.ts)), t)} ago` : '',
+      ),
+      tile(
+        'Lines changed',
+        [
+          h('span', { class: 'a' }, `+${compact(sum.added)}`),
+          ' ',
+          h('span', { class: 'd' }, `−${compact(sum.deleted)}`),
+        ],
+        `net ${signed(sum.added - sum.deleted)}`,
+      ),
+      tile(
+        'In tests',
+        pct(ts.share),
+        `${compact(ts.test)} of ${compact(ts.test + ts.other)} lines`,
+      ),
+      tile(
+        'Uncommitted',
+        [
+          h('span', { class: 'a' }, `+${compact(unAdded)}`),
+          ' ',
+          h('span', { class: 'd' }, `−${compact(unDeleted)}`),
+        ],
+        `${plural(unFiles, 'file')} differ from HEAD`,
+      ),
+      tile(
+        'Longest quiet gap',
+        fmtDur(tp.gapMs),
+        tp.gapEnd && tp.gapEnd < t - 1000 ? `ended ${fmtClock(tp.gapEnd)}` : 'still running',
+      ),
+    ),
+    card(
+      'Activity',
+      `lines per ${fmtDur(bucketMs)} · last ${label}`,
+      'full',
+      activityChart(buckets, bucketMs),
+    ),
+    card(
+      'Uncommitted work',
+      'lines that differ from HEAD',
+      'half',
+      lineChart(uncommittedSeries(start), { label: 'Uncommitted lines over time', cols: halfSpan }),
+    ),
+    card(
+      'Repo size',
+      rs ? `net lines over ${rs.days} days · ${signed(trendDelta)}` : 'loading…',
+      'half',
+      rs
+        ? lineChart(trend, { label: 'Net lines committed', fmt: signed, cols: halfSpan })
+        : emptyNote('Reading history…'),
+    ),
+    card(
+      'Where the work is',
+      'lines changed by directory · tests in purple',
+      '',
+      edits.length
+        ? barList(churnBy(edits, 2).slice(0, 8), {
+            name: (r) => r.key,
+            max: (r) => r.total,
+            cls: (r) => (isTestPath(`${r.key}/`) ? 'test' : ''),
+            value: (r) => [
+              h('span', { class: 'a' }, `+${r.added}`),
+              ' ',
+              h('span', { class: 'd' }, `−${r.deleted}`),
+            ],
+          })
+        : emptyNote(`No edits in the last ${label}.`),
+    ),
+    card(
+      'Hot files',
+      'most edited · tests in purple',
+      '',
+      edits.length
+        ? barList(
+            churnBy(edits, Infinity)
+              .sort((a, b) => b.edits - a.edits || b.total - a.total)
+              .slice(0, 8),
+            {
+              name: (r) => r.key,
+              max: (r) => r.edits,
+              cls: (r) => (isTestPath(r.key) ? 'test' : ''),
+              value: (r) => `${plural(r.edits, 'edit')} · ${r.total} lines`,
+            },
+          )
+        : emptyNote(`No edits in the last ${label}.`),
+    ),
+    card(
+      'Commits by type',
+      'conventional commit prefixes',
+      '',
+      commits.length
+        ? barList(commitTypes(commits.map((c) => c.commit)), {
+            name: (r) => r.type,
+            max: (r) => r.n,
+            value: (r) => plural(r.n, 'commit'),
+          })
+        : emptyNote(`No commits in the last ${label}.`),
+    ),
+    card(
+      'Tests vs source',
+      'share of changed lines',
+      '',
+      edits.length
+        ? [stack(testParts, (p, i) => TEST_COLORS[i]), legend(testParts, (p, i) => TEST_COLORS[i])]
+        : emptyNote(`No edits in the last ${label}.`),
+    ),
+    card(
+      'Files by type',
+      rs ? `${compact(rs.files.total)} tracked files` : 'loading…',
+      '',
+      mix.length
+        ? [
+            stack(mix, (p, i) => MIX_STEPS[Math.min(i, 5)]),
+            legend(mix, (p, i) => MIX_STEPS[Math.min(i, 5)]),
+          ]
+        : emptyNote('Reading files…'),
+    ),
+  )
+}
+
 // --- keyboard ----------------------------------------------------------------
 
 function activeList() {
@@ -867,6 +1464,8 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault()
     els.filter.focus()
     els.filter.select()
+  } else if (ev.key === 's') {
+    setView(state.view === 'stats' ? 'feed' : 'stats')
   } else if (ev.key === 'g') {
     els.feed.scrollTo({ top: 0 })
     if (state.pending) invalidate('feed')
@@ -901,6 +1500,10 @@ els.tabs.addEventListener('click', (ev) => {
   if (!b) return
   setPanel(b.dataset.panel)
 })
+els.view.addEventListener('click', (ev) => {
+  const b = ev.target.closest('button')
+  if (b) setView(b.dataset.view)
+})
 els.newpill.addEventListener('click', () => {
   els.feed.scrollTo({ top: 0 })
   invalidate('feed')
@@ -909,21 +1512,75 @@ els.feed.addEventListener('scroll', () => {
   if (state.pending && !scrolledDown()) invalidate('feed')
 })
 els.drawerClose.addEventListener('click', closeDrawer)
+els.wrapBtn.addEventListener('click', () => setWrap(!els.diff.classList.contains('wrap')))
+els.mode.addEventListener('click', (ev) => {
+  const b = ev.target.closest('button')
+  if (b) setMode(b.dataset.mode)
+})
+
+/** Long lines wrap by default; the toggle remembers the reader's choice. */
+function setWrap(on) {
+  els.diff.classList.toggle('wrap', on)
+  els.wrapBtn.classList.toggle('on', on)
+  els.wrapBtn.setAttribute('aria-pressed', on ? 'true' : 'false')
+  try {
+    localStorage.setItem('repo-pulse.wrap', on ? '1' : '0')
+  } catch {}
+}
 els.cmuxBtn.addEventListener('click', openInCmux)
 els.theme.addEventListener('click', () => {
   const i = THEMES.indexOf(document.documentElement.dataset.theme ?? 'auto')
   setTheme(THEMES[(i + 1) % THEMES.length])
+})
+let resizeTimer = 0
+addEventListener('resize', () => {
+  clearTimeout(resizeTimer)
+  resizeTimer = setTimeout(() => invalidate('stats'), 150)
 })
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && state.pending) invalidate('feed')
 })
 
 function setPanel(panel) {
+  setPanelTab(panel)
+  setView(panel === 'stats' ? 'stats' : 'feed')
+  if (panel === 'feed' && state.pending) invalidate('feed')
+}
+
+function setPanelTab(panel) {
   state.panel = panel
   for (const b of els.tabs.querySelectorAll('button'))
     b.classList.toggle('on', b.dataset.panel === panel)
   for (const id of ['feed', 'tree', 'items']) $(`panel-${id}`).classList.toggle('on', id === panel)
-  if (panel === 'feed' && state.pending) invalidate('feed')
+}
+
+/** Feed (the three panels) or Stats (the dashboard) fill the same area; only one is live. */
+function setView(view) {
+  state.view = view
+  for (const b of els.view.querySelectorAll('button'))
+    b.classList.toggle('on', b.dataset.view === view)
+  els.grid.hidden = view === 'stats'
+  els.stats.hidden = view !== 'stats'
+  if (view === 'stats') {
+    if (state.panel !== 'stats') setPanelTab('stats')
+    invalidate('stats')
+    loadRepoStats()
+  } else if (state.panel === 'stats') setPanelTab('feed')
+  if (location.hash !== `#${view}`) history.replaceState(null, '', `#${view}`)
+  try {
+    localStorage.setItem('repo-pulse.view', view)
+  } catch {}
+}
+
+async function loadRepoStats() {
+  if (state.repoStats && Date.now() - state.repoStats.at < 60_000) return
+  try {
+    const r = await fetch('/api/stats').then((x) => x.json())
+    state.repoStats = { ...r, at: Date.now() }
+    invalidate('stats')
+  } catch (err) {
+    console.error('repo stats', err)
+  }
 }
 
 function setTheme(theme) {
@@ -940,6 +1597,17 @@ async function loadState() {
   const s = await fetch('/api/state').then((r) => r.json())
   replaceState(s)
   renderAll()
+  openFromHash()
+}
+
+/** `#file=<wt>:<path>` reopens a file drawer, so a link to a diff survives a reload. */
+function openFromHash() {
+  const m = /^#file=([^:]+):(.+)$/.exec(location.hash)
+  if (!m || state.drawer) return
+  const wt = decodeURIComponent(m[1])
+  const path = decodeURIComponent(m[2])
+  const file = state.snapshots.get(wt)?.files.find((f) => f.path === path)
+  if (file) openFile(wt, path, file, `tree:${wt}:${path}`)
 }
 
 function connect() {
@@ -960,11 +1628,14 @@ function connect() {
       if (!ingest(ev, { live: true })) return
       const visible = feedRows().some((r) => r.id === ev.id)
       onLiveRows(visible ? 1 : 0)
-      invalidate('header', 'status', type === 'commit' ? 'items' : 'tree')
+      invalidate('header', 'status', 'stats', type === 'commit' ? 'items' : 'tree')
     })
   live('edit')
   live('commit')
   live('head')
+  es.addEventListener('sample', (m) => {
+    if (ingest(JSON.parse(m.data))) invalidate('stats')
+  })
   es.addEventListener('snapshot', (m) => {
     const sn = JSON.parse(m.data)
     state.snapshots.set(sn.wt.id, sn)
@@ -1010,10 +1681,15 @@ try {
     for (const b of els.window.querySelectorAll('button'))
       b.classList.toggle('on', b.dataset.w === w)
   }
+  setWrap(localStorage.getItem('repo-pulse.wrap') !== '0')
+  state.mdMode = localStorage.getItem('repo-pulse.mdMode') === 'diff' ? 'diff' : 'rendered'
   const theme = localStorage.getItem('repo-pulse.theme')
   setTheme(THEMES.includes(theme) ? theme : 'auto')
+  const wanted = location.hash === '#stats' ? 'stats' : location.hash === '#feed' ? 'feed' : null
+  if ((wanted ?? localStorage.getItem('repo-pulse.view')) === 'stats') setView('stats')
 } catch {
   setTheme('auto')
+  setWrap(true)
 }
 
 setFavicon(false)

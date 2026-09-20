@@ -13,9 +13,20 @@ repo-pulse --stop # stop the background instance for this repo
 Run it from anywhere inside a repo. Running it again for a repo that already has a feed just
 opens that feed; a second repo gets the next free port. Rows appear as files change. Click a
 row for the diff, `j`/`k` to move, `Enter` to open, `Esc` to close, `/` to filter, `1`–`5` to
-pick a window, `g` to jump to the top. New rows queue behind a pill while you are scrolled into
-history. Commits in the window are rolled up by work item id (`W-032`, `D-43`; change the
-pattern with `--items`). Click a worktree chip to see only that worktree.
+pick a window, `g` to jump to the top, `s` to switch between the feed and the stats view. New
+rows queue behind a pill while you are scrolled into history. Commits in the window are rolled
+up by work item id (`W-032`, `D-43`; change the pattern with `--items`). Click a worktree chip
+to see only that worktree.
+
+**Stats** (`s`, or `/#stats`) is a dashboard for the same window: active minutes, edits,
+commits, lines, share of changes landing in tests, uncommitted work, longest quiet gap; lines
+added and deleted over time with commits marked; uncommitted work and repo size trend lines;
+where the work is by directory, hot files, commit types, and the file mix. Everything comes
+from git and the edit log, so it works for any repo.
+
+**Markdown** files open rendered, with added lines highlighted and deleted text struck through
+where it was; the Rendered / Diff toggle in the drawer switches to the raw diff. Long diff lines
+wrap by default (the `wrap` button turns that off). A drawer's URL (`#file=…`) survives a reload.
 
 ## Install
 

@@ -29,8 +29,20 @@ export interface HeadEvent {
   branch: string | null
 }
 
-export type PulseEvent = EditEvent | CommitEvent | HeadEvent
-export type NewEvent = Omit<EditEvent, 'id'> | Omit<CommitEvent, 'id'> | Omit<HeadEvent, 'id'>
+/** A reading of how much uncommitted work a worktree holds, taken when it changes. */
+export interface SampleEvent {
+  type: 'sample'
+  id: number
+  ts: number
+  wt: string
+  files: number
+  added: number
+  deleted: number
+}
+
+export type PulseEvent = EditEvent | CommitEvent | HeadEvent | SampleEvent
+export type NewEvent =
+  Omit<EditEvent, 'id'> | Omit<CommitEvent, 'id'> | Omit<HeadEvent, 'id'> | Omit<SampleEvent, 'id'>
 
 export interface WorktreeSnapshot {
   wt: Worktree
@@ -41,6 +53,8 @@ export interface WorktreeSnapshot {
 const MAX_EDITS = 5000
 const MAX_COMMITS = 2000
 const MAX_HEADS = 200
+const MAX_SAMPLES = 4000
+const SAMPLE_GAP_MS = 20_000
 const LOAD_WINDOW_MS = 7 * 24 * 3600 * 1000
 
 /** In-memory ring buffers plus an append-only JSONL log for edits, so a restart keeps the night's history. */
@@ -48,6 +62,7 @@ export class EventStore {
   edits: EditEvent[] = []
   commits: CommitEvent[] = []
   heads: HeadEvent[] = []
+  samples: SampleEvent[] = []
   snapshots = new Map<string, WorktreeSnapshot>()
   private shas = new Set<string>()
   private nextId = 1
@@ -80,6 +95,7 @@ export class EventStore {
         }
         if (ev.type === 'edit') this.edits.push(ev)
         else if (ev.type === 'head') this.heads.push(ev)
+        else if (ev.type === 'sample') this.samples.push(ev)
       } catch {
         // A torn last line from a crash is not worth failing startup over.
         dropped++
@@ -95,7 +111,7 @@ export class EventStore {
   /** Rewrites the log with only what was kept, so it does not grow without bound. */
   private async compact(): Promise<void> {
     if (!this.logPath) return
-    const kept = [...this.edits, ...this.heads].sort((a, b) => a.id - b.id)
+    const kept = [...this.edits, ...this.heads, ...this.samples].sort((a, b) => a.id - b.id)
     const tmp = `${this.logPath}.tmp`
     try {
       await mkdir(path.dirname(this.logPath), { recursive: true })
@@ -114,9 +130,37 @@ export class EventStore {
     const full = { ...ev, id: this.nextId++ } as PulseEvent
     if (full.type === 'edit') this.edits = [...this.edits, full].slice(-MAX_EDITS)
     else if (full.type === 'commit') this.commits = [...this.commits, full].slice(-MAX_COMMITS)
+    else if (full.type === 'sample') this.samples = [...this.samples, full].slice(-MAX_SAMPLES)
     else this.heads = [...this.heads, full].slice(-MAX_HEADS)
     if (full.type !== 'commit') this.persist(full)
     return full
+  }
+
+  /**
+   * Turns a changed snapshot into a sample of uncommitted work, at most one per worktree per
+   * SAMPLE_GAP_MS except when the totals return to zero (a commit), which is always worth a point.
+   */
+  sample(snapshot: WorktreeSnapshot): SampleEvent | null {
+    let added = 0
+    let deleted = 0
+    for (const f of snapshot.files) {
+      added += f.added
+      deleted += f.deleted
+    }
+    const files = snapshot.files.length
+    const last = this.samples.findLast((s) => s.wt === snapshot.wt.id)
+    if (last && last.files === files && last.added === added && last.deleted === deleted)
+      return null
+    if (last && files > 0 && snapshot.at - last.ts < SAMPLE_GAP_MS) return null
+    const ev = this.add({
+      type: 'sample',
+      ts: snapshot.at,
+      wt: snapshot.wt.id,
+      files,
+      added,
+      deleted,
+    })
+    return ev?.type === 'sample' ? ev : null
   }
 
   /** Resolves once every queued append has hit disk; call before exiting. */
@@ -140,12 +184,14 @@ export class EventStore {
     edits: EditEvent[]
     commits: CommitEvent[]
     heads: HeadEvent[]
+    samples: SampleEvent[]
     snapshots: WorktreeSnapshot[]
   } {
     return {
       edits: this.edits.slice(-1500),
       commits: this.commits.slice(-600),
       heads: this.heads.slice(-50),
+      samples: this.samples.slice(-1500),
       snapshots: [...this.snapshots.values()],
     }
   }

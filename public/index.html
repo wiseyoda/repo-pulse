@@ -637,6 +637,248 @@
         background: var(--line);
       }
 
+      /* Stats view */
+      .dash {
+        height: calc(100% - var(--top-h) - var(--foot-h));
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 16px 16px 40px;
+        display: grid;
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+        gap: 12px;
+        align-content: start;
+      }
+      .card {
+        grid-column: span 4;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 12px 14px 10px;
+        min-width: 0;
+      }
+      .card.wide {
+        grid-column: span 8;
+      }
+      .card.full {
+        grid-column: span 12;
+      }
+      .card.half {
+        grid-column: span 6;
+      }
+      .card h3 {
+        margin: 0 0 8px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      .card h3 .sub {
+        margin-left: auto;
+        font-weight: 400;
+        text-transform: none;
+        letter-spacing: 0;
+        color: var(--faint);
+        font-family: var(--mono);
+      }
+      .tiles {
+        grid-column: span 12;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+      }
+      .tile {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 14px 8px;
+        min-width: 0;
+      }
+      .tile .label {
+        font-size: 11px;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .tile .value {
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        line-height: 1.25;
+        margin-top: 2px;
+        white-space: nowrap;
+      }
+      .tile .value .a {
+        color: var(--add);
+      }
+      .tile .value .d {
+        color: var(--del);
+      }
+      .tile .value small {
+        font-size: 13px;
+        font-weight: 400;
+        color: var(--muted);
+        margin-left: 4px;
+      }
+      .tile .hint {
+        font-size: 11px;
+        color: var(--faint);
+        margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .tile .spark {
+        display: block;
+        width: 100%;
+        height: 22px;
+        margin-top: 6px;
+      }
+      .chart {
+        display: block;
+        width: 100%;
+        overflow: visible;
+        font-family: var(--mono);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+      }
+      .chart .grid-line {
+        stroke: var(--line);
+        stroke-width: 1;
+      }
+      .chart .axis {
+        fill: var(--faint);
+      }
+      .chart .add {
+        fill: var(--add);
+      }
+      .chart .del {
+        fill: var(--del);
+      }
+      .chart .commit {
+        fill: var(--commit);
+      }
+      .chart .line {
+        fill: none;
+        stroke: var(--mod);
+        stroke-width: 2;
+        stroke-linejoin: round;
+        stroke-linecap: round;
+      }
+      .chart .area {
+        fill: var(--mod);
+        opacity: 0.1;
+      }
+      .chart .dot {
+        fill: var(--mod);
+        stroke: var(--panel);
+        stroke-width: 2;
+      }
+      .chart .hit {
+        fill: transparent;
+      }
+      .chart .hit:hover {
+        fill: var(--flash);
+      }
+      .bars {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        row-gap: 5px;
+        column-gap: 10px;
+        align-items: center;
+      }
+      .bars .name {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .bars .name .track {
+        flex: none;
+        height: 8px;
+        border-radius: 0 4px 4px 0;
+        background: var(--mod);
+        min-width: 2px;
+      }
+      .bars .name .track.test {
+        background: var(--commit);
+      }
+      .bars .n {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+        text-align: right;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .bars .n .a {
+        color: var(--add);
+      }
+      .bars .n .d {
+        color: var(--del);
+      }
+      .stack {
+        display: flex;
+        height: 10px;
+        gap: 2px;
+        border-radius: 5px;
+        overflow: hidden;
+        margin: 6px 0 8px;
+      }
+      .stack i {
+        display: block;
+        height: 100%;
+        min-width: 2px;
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 14px;
+        font-size: 11px;
+        color: var(--muted);
+        font-family: var(--mono);
+      }
+      .legend i {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+        margin-right: 6px;
+        vertical-align: -1px;
+      }
+      .dash .empty {
+        grid-column: span 12;
+      }
+      .tip {
+        position: fixed;
+        z-index: 20;
+        pointer-events: none;
+        background: var(--pill-bg);
+        color: var(--pill-fg);
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.5;
+        padding: 6px 9px;
+        border-radius: 6px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+        white-space: nowrap;
+        transform: translate(-50%, calc(-100% - 10px));
+      }
+      .tip .a {
+        color: #3fb950;
+      }
+      .tip .d {
+        color: #f85149;
+      }
+
       /* Footer status bar */
       .foot {
         height: var(--foot-h);
@@ -768,6 +1010,14 @@
         opacity: 0.6;
         cursor: default;
       }
+      .btn.tog {
+        color: var(--muted);
+      }
+      .btn.tog.on {
+        background: var(--sel);
+        color: var(--fg);
+        border-color: var(--mod);
+      }
       .btn.icon {
         width: 26px;
         padding: 0;
@@ -775,6 +1025,194 @@
         line-height: 1;
         color: var(--muted);
       }
+      .seg.small button {
+        padding: 3px 8px;
+        font-size: 11.5px;
+      }
+
+      /* Rendered markdown with the diff painted on */
+      .prose {
+        flex: 1;
+        overflow: auto;
+        padding: 20px 28px 48px;
+        font-size: 13.5px;
+        line-height: 1.6;
+        max-width: 100%;
+      }
+      .prose > * {
+        max-width: 78ch;
+      }
+      .prose h1,
+      .prose h2,
+      .prose h3,
+      .prose h4,
+      .prose h5,
+      .prose h6 {
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        line-height: 1.3;
+        margin: 1.6em 0 0.5em;
+      }
+      .prose > :first-child {
+        margin-top: 0;
+      }
+      .prose h1 {
+        font-size: 20px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid var(--line);
+      }
+      .prose h2 {
+        font-size: 16px;
+        padding-bottom: 4px;
+        border-bottom: 1px solid var(--line);
+      }
+      .prose h3 {
+        font-size: 14px;
+      }
+      .prose h4,
+      .prose h5,
+      .prose h6 {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .prose p {
+        margin: 0 0 0.9em;
+      }
+      .prose ul,
+      .prose ol {
+        margin: 0 0 0.9em;
+        padding-left: 1.5em;
+      }
+      .prose li {
+        margin: 0.15em 0;
+      }
+      .prose li ul,
+      .prose li ol {
+        margin: 0.15em 0 0;
+      }
+      .prose li.task {
+        list-style: none;
+        margin-left: -1.5em;
+        padding-left: 1.5em;
+        text-indent: -1.5em;
+      }
+      .prose li.task input {
+        margin: 0 0.5em 0 0;
+        vertical-align: -1px;
+        accent-color: var(--add);
+      }
+      .prose li.task.done {
+        color: var(--muted);
+      }
+      .prose li.task.done ins {
+        color: var(--fg);
+      }
+      .prose code {
+        font-family: var(--mono);
+        font-size: 0.92em;
+        background: var(--hover);
+        padding: 1px 4px;
+        border-radius: 4px;
+      }
+      .prose pre {
+        margin: 0 0 0.9em;
+        padding: 10px 12px;
+        border-radius: 6px;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        overflow-x: auto;
+        font: 11.5px/1.5 var(--mono);
+      }
+      .prose pre code {
+        background: none;
+        padding: 0;
+        font-size: inherit;
+        display: block;
+        white-space: pre;
+      }
+      .prose pre code .ins {
+        background: var(--add-bg);
+        display: inline-block;
+        width: 100%;
+      }
+      .prose blockquote {
+        margin: 0 0 0.9em;
+        padding: 2px 14px;
+        border-left: 3px solid var(--line-strong);
+        color: var(--muted);
+      }
+      .prose blockquote p {
+        margin: 0;
+      }
+      .prose hr {
+        border: 0;
+        border-top: 1px solid var(--line);
+        margin: 1.4em 0;
+      }
+      .prose a {
+        color: var(--mod);
+        text-decoration: none;
+      }
+      .prose a:hover {
+        text-decoration: underline;
+      }
+      .prose table {
+        border-collapse: collapse;
+        margin: 0 0 0.9em;
+        font-size: 12.5px;
+      }
+      .prose th,
+      .prose td {
+        border: 1px solid var(--line);
+        padding: 4px 10px;
+        text-align: left;
+        vertical-align: top;
+      }
+      .prose th {
+        background: var(--hover);
+        font-weight: 600;
+      }
+      .prose ins {
+        text-decoration: none;
+        background: var(--add-bg);
+        box-shadow: 0 0 0 2px var(--add-bg);
+        border-radius: 2px;
+      }
+      .prose tr.ins-row td {
+        background: var(--add-bg);
+      }
+      .prose .ins-block {
+        position: relative;
+      }
+      .prose .ins-block::before {
+        content: '';
+        position: absolute;
+        left: -14px;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+        border-radius: 2px;
+        background: var(--add);
+        opacity: 0.8;
+      }
+      .prose del.gone {
+        display: block;
+        margin: 0 0 0.6em;
+        padding: 2px 10px;
+        border-left: 3px solid var(--del);
+        background: var(--del-bg);
+        color: var(--muted);
+        text-decoration: line-through;
+        text-decoration-color: var(--del);
+        font-size: 12.5px;
+        white-space: pre-wrap;
+        border-radius: 0 4px 4px 0;
+      }
+      .prose .empty {
+        padding-top: 8px;
+        text-align: left;
+      }
+
       .files {
         display: flex;
         gap: 4px;
@@ -821,6 +1259,13 @@
       }
       .diff .code {
         padding: 0 14px 0 8px;
+      }
+      .diff.wrap .l {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .diff.wrap .l.file .code {
+        white-space: pre-wrap;
       }
       .diff .l.add {
         background: var(--add-bg);
@@ -885,15 +1330,17 @@
         }
         .grid {
           grid-template-columns: 1fr;
+          grid-template-rows: minmax(0, 1fr);
           height: calc(100% - var(--top-h) - 36px - var(--foot-h));
         }
         .col + .col {
           border-left: 0;
         }
+        /* The side column dissolves so its sections become the grid's own panels. */
         .side {
           display: contents;
         }
-        .grid > .col:not(.on),
+        .grid > .feed:not(.on),
         .side > section:not(.on) {
           display: none;
         }
@@ -912,6 +1359,26 @@
         .drawer {
           width: 100%;
           min-width: 0;
+        }
+        .seg.view {
+          display: none;
+        }
+        .dash {
+          height: calc(100% - var(--top-h) - 36px - var(--foot-h));
+          padding: 12px 12px 40px;
+        }
+        .card,
+        .card.wide,
+        .card.half {
+          grid-column: span 12;
+        }
+      }
+      @media (min-width: 961px) and (max-width: 1400px) {
+        .card {
+          grid-column: span 6;
+        }
+        .card.wide {
+          grid-column: span 12;
         }
       }
       @media (max-width: 640px) {
@@ -947,6 +1414,10 @@
       </div>
       <div class="wts" id="wts"></div>
       <div class="spacer"></div>
+      <div class="seg view" id="view" role="group" aria-label="View">
+        <button data-view="feed" class="on">Feed</button>
+        <button data-view="stats">Stats</button>
+      </div>
       <div class="seg" id="window" role="group" aria-label="Time window">
         <button data-w="900000">15m</button>
         <button data-w="3600000" class="on">1h</button>
@@ -968,6 +1439,7 @@
       </button>
       <button data-panel="tree">Working tree<span class="count" id="tab-tree"></span></button>
       <button data-panel="items">Work items<span class="count" id="tab-items"></span></button>
+      <button data-panel="stats">Stats</button>
     </nav>
     <main class="grid">
       <section class="col feed on" id="panel-feed">
@@ -989,6 +1461,8 @@
         </section>
       </aside>
     </main>
+    <section class="dash" id="panel-stats" hidden aria-label="Stats"></section>
+    <div class="tip" id="tip" hidden></div>
     <footer class="foot">
       <span class="status" id="status">connecting…</span>
       <span class="keys" aria-hidden="true">
@@ -1004,6 +1478,13 @@
         <div class="title" id="drawer-title"></div>
         <div class="stats" id="drawer-stats"></div>
         <div class="actions">
+          <div class="seg small" id="mode" role="group" aria-label="View" hidden>
+            <button data-mode="rendered" class="on">Rendered</button>
+            <button data-mode="diff">Diff</button>
+          </div>
+          <button class="btn tog" id="wrap-btn" aria-pressed="true" title="Wrap long lines">
+            wrap
+          </button>
           <button class="btn" id="cmux-btn" hidden>Open in cmux</button>
           <button class="btn icon" id="drawer-close" aria-label="Close" title="Close (esc)">
             ×
@@ -1012,6 +1493,7 @@
       </header>
       <nav class="files" id="drawer-files" hidden></nav>
       <pre class="diff" id="diff"></pre>
+      <div class="prose" id="prose" hidden></div>
     </div>
     <script type="module" src="/pulse.js"></script>
   </body>

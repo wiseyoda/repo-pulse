@@ -103,7 +103,7 @@ describe('numberDiff', () => {
     expect(lines[4]?.cls).toBe('hunk')
     expect(lines.slice(5)).toEqual([
       { cls: 'ctx', old: 10, new: 10, text: ' one' },
-      { cls: 'del', old: 11, text: '-two' },
+      { cls: 'del', old: 11, at: 11, text: '-two' },
       { cls: 'add', new: 11, text: '+TWO' },
       { cls: 'add', new: 12, text: '+three' },
       { cls: 'ctx', old: 12, new: 13, text: ' four' },

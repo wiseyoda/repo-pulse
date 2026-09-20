@@ -9,6 +9,8 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
 - `src/watcher.ts` — how filesystem events become debounced git snapshots and edit deltas
 - `src/delta.ts` — the rules that decide what counts as an edit (created, modified, reverted, ...)
 - `public/pulse.js` — the page; `public/lib.js` holds the pure helpers it shares with tests
+  (feed merging, diff numbering, stats aggregation); `public/md.js` renders markdown with diff
+  marks as a pure node tree
 
 ## Commands
 
@@ -21,7 +23,8 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
 
 - `src/git.ts` — git shell-outs and NUL-safe parsers; no other file calls git
 - `src/store.ts` — ring buffers + append-only JSONL under `~/.repo-pulse/<repo>-<id>/`, compacted on load
-- `src/server.ts` — plain `node:http`: static files, `/api/state`, `/api/health`, `/events` (SSE), diffs
+- `src/server.ts` — plain `node:http`: static files, `/api/state`, `/api/health`, `/api/stats`
+  (30 days of commit sizes + file mix, cached 60s), `/api/file`, `/events` (SSE), diffs
 - `src/cli.ts` — arg parsing, wiring, instance reuse via `server.json`, `--detach`/`--stop`, opening
   the page (`cmux new-surface` in the caller's pane when inside cmux, else the default browser)
 - `bin/repo-pulse` — shim; symlinked from `~/.local/bin/repo-pulse`
@@ -34,7 +37,8 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
   watcher never takes `index.lock` from under an agent. Diff endpoints only accept paths git
   already reports.
 - The server refuses non-loopback `Host` headers and cross-origin POSTs; keep it that way.
-- Commits are re-read from git on start; only edits and HEAD moves are persisted.
+- Commits are re-read from git on start; edits, HEAD moves, and uncommitted-work samples are
+  persisted (samples at most one per worktree per 20s, always when totals hit zero).
 - Server binds 127.0.0.1 only. The default port falls back to a free one; an explicit `--port` fails loudly.
 - One state dir per repo, keyed by the main worktree, so every worktree shares one log and one instance.
 

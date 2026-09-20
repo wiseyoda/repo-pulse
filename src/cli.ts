@@ -238,6 +238,8 @@ async function main(): Promise<void> {
     onSnapshot: (snapshot) => {
       store.snapshots.set(snapshot.wt.id, snapshot)
       server.broadcast('snapshot', snapshot)
+      const sample = store.sample(snapshot)
+      if (sample) server.broadcast('sample', sample, sample.id)
     },
     onWorktrees: (wts) => server.broadcast('worktrees', wts),
     onError: (err) => console.error('repo-pulse:', err instanceof Error ? err.message : err),

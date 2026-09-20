@@ -369,3 +369,21 @@ export async function commitPatch(cwd: string, sha: string): Promise<string> {
     '--',
   ])
 }
+
+export interface ExtCount {
+  ext: string
+  n: number
+}
+
+/** Tracked files by extension, cheap enough to call on demand: one `ls-files`, no reads. */
+export async function fileMix(cwd: string): Promise<{ total: number; byExt: ExtCount[] }> {
+  const files = (await git(cwd, ['ls-files', '-z'])).split('\0').filter(Boolean)
+  const counts = new Map<string, number>()
+  for (const f of files) {
+    const base = f.slice(f.lastIndexOf('/') + 1)
+    const dot = base.lastIndexOf('.')
+    const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : base.toLowerCase()
+    counts.set(ext, (counts.get(ext) ?? 0) + 1)
+  }
+  return { total: files.length, byExt: [...counts].map(([ext, n]) => ({ ext, n })) }
+}
