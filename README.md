@@ -110,9 +110,8 @@ log, so it works for any repo:
 An opt-in view (`u`, or `/#usage`) of what the coding agents working in this repo cost. Enable
 it once per repo and repo-pulse reads the transcripts on this machine whose working directory
 is inside the repo: Claude Code (every `~/.claude*` config dir, subagents included), Codex
-(`~/.codex*` rollouts), Grok (`~/.grok` sessions), and Antigravity (conversation summaries
-under `~/.gemini*/antigravity*`, which carry sessions and steps but no tokens, so they show as
-activity and stay unpriced). Only usage and metadata fields are read (tokens, model,
+(`~/.codex*` rollouts), Grok (`~/.grok` sessions), and Antigravity (per-conversation SQLite databases under `~/.gemini*/antigravity*`, decoded
+the way ccusage's adapter does, so models and tokens match it). Only usage and metadata fields are read (tokens, model,
 timestamp, working directory, branch), never message content.
 
 - Tiles: API-equivalent cost, tokens, cache hit rate, sessions, cost per commit, cost per 100

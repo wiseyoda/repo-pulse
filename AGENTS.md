@@ -56,8 +56,12 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
   as a sub-second burst at the head of the file: skip it. Subagent transcripts sit under
   `<session>/subagents/`, so the Claude walk must go several levels deep. A Codex rollout's
   `session_meta` line can run past 4 KB, so read to its newline, not a fixed head. Antigravity
-  is read through `node:sqlite` (built in, still zero dependencies); bump `CURSOR_VERSION` in
-  `src/usage.ts` whenever a cached skip decision could change.
+  is read through `node:sqlite` (built in, still zero dependencies): `conversation_summaries.db`
+  maps conversations to workspaces, and each `conversations/<id>.db` holds protobuf blobs that
+  `src/antigravity.ts` decodes with ccusage's field numbers, model-id table, and identity
+  merge. Fresh writes land in the `-wal` file, so change detection stats both. Bump
+  `CURSOR_VERSION` in `src/usage.ts` whenever a cached skip decision could change; superseded
+  entries are removed with tombstone lines in `usage.jsonl`.
 
 ## Traps
 

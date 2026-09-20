@@ -354,6 +354,11 @@ describe('UsageStore persistence', () => {
     await b.load()
     expect(b.entries.get('k')?.output).toBe(50)
     expect(b.entries.size).toBe(1)
+    expect(b.remove('k')).toBe(true)
+    await b.persist([])
+    const c = new UsageStore(dir)
+    await c.load()
+    expect(c.entries.size).toBe(0)
   })
 })
 

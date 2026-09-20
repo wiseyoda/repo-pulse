@@ -16,11 +16,12 @@ import {
 } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { conversationEvents, readConversation } from './antigravity.ts'
 
 export type Tool = 'claude' | 'codex' | 'grok' | 'antigravity'
 export const TOOLS: Tool[] = ['claude', 'codex', 'grok', 'antigravity']
 /** Bump when cursor semantics change so cached skip decisions are re-made. */
-export const CURSOR_VERSION = 2
+export const CURSOR_VERSION = 4
 
 export interface UsageEntry {
   /** Stable identity so a re-read replaces rather than double counts. */
@@ -110,9 +111,9 @@ export async function discoverSources(home = os.homedir()): Promise<Source[]> {
     }
     if (/^\.gemini(-[\w.-]+)?$/.test(name)) {
       for (const sub of ['antigravity', 'antigravity-cli', 'antigravity-ide']) {
-        const db = path.join(dir, sub, 'conversation_summaries.db')
-        if (existsSync(db))
-          out.push({ tool: 'antigravity', seat: `${name.slice(1)}/${sub}`, dir: db })
+        const root = path.join(dir, sub)
+        if (existsSync(path.join(root, 'conversation_summaries.db')))
+          out.push({ tool: 'antigravity', seat: `${name.slice(1)}/${sub}`, dir: root })
       }
     }
   }
@@ -433,6 +434,7 @@ export class UsageStore {
   readonly entries = new Map<string, UsageEntry>()
   cursors: Record<string, { size: number; mtimeMs: number; offset: number; skip?: boolean }> = {}
   private appended = 0
+  private tombstones: string[] = []
   private readonly dir: string
 
   constructor(dir: string) {
@@ -445,8 +447,9 @@ export class UsageStore {
       for (const line of raw.split('\n')) {
         if (!line) continue
         try {
-          const e = JSON.parse(line) as UsageEntry
-          this.entries.set(e.key, e)
+          const e = JSON.parse(line) as UsageEntry & { deleted?: boolean }
+          if (e.deleted) this.entries.delete(e.key)
+          else this.entries.set(e.key, e)
         } catch {}
       }
       this.appended = raw.split('\n').length
@@ -473,8 +476,17 @@ export class UsageStore {
     return 'updated'
   }
 
+  /** Drops an entry; the removal is persisted as a tombstone line. */
+  remove(key: string): boolean {
+    if (!this.entries.has(key)) return false
+    this.entries.delete(key)
+    this.tombstones.push(key)
+    return true
+  }
+
   async persist(changed: UsageEntry[]): Promise<void> {
-    if (!changed.length) return
+    const tombstones = this.tombstones.splice(0)
+    if (!changed.length && !tombstones.length) return
     await mkdir(this.dir, { recursive: true })
     const file = path.join(this.dir, 'usage.jsonl')
     if (this.appended > this.entries.size * 2 + 1000) {
@@ -485,8 +497,12 @@ export class UsageStore {
       this.appended = this.entries.size
       return
     }
-    await appendFile(file, changed.map((e) => JSON.stringify(e) + '\n').join(''))
-    this.appended += changed.length
+    const lines = [
+      ...changed.map((e) => JSON.stringify(e)),
+      ...tombstones.map((key) => JSON.stringify({ key, deleted: true })),
+    ]
+    await appendFile(file, lines.map((l) => l + '\n').join(''))
+    this.appended += lines.length
   }
 
   async saveCursors(): Promise<void> {
@@ -628,14 +644,13 @@ export async function scan(
         store.cursors[f] = { size: st.size, mtimeMs: st.mtimeMs, offset: st.size }
       }
     } else if (src.tool === 'antigravity') {
-      const st = await stat(src.dir).catch(() => null)
-      if (!st) continue
-      const cur = store.cursors[src.dir]
-      if (cur && cur.size === st.size && cur.mtimeMs === st.mtimeMs) continue
+      // The summaries DB says which conversations belong to the repo; each conversation's own
+      // DB (plus its WAL, which is where fresh writes land) carries the token usage.
+      const summariesDb = path.join(src.dir, 'conversation_summaries.db')
       let rows: AntigravityRow[] = []
       try {
         const { DatabaseSync } = await import('node:sqlite')
-        const db = new DatabaseSync(src.dir, { readOnly: true })
+        const db = new DatabaseSync(summariesDb, { readOnly: true })
         try {
           rows = db
             .prepare(
@@ -652,10 +667,53 @@ export async function scan(
         )
         continue
       }
-      files++
-      seats.add(src.seat)
-      for (const e of antigravityEntries(rows, src.seat, cfg.roots)) file(e)
-      store.cursors[src.dir] = { size: st.size, mtimeMs: st.mtimeMs, offset: st.size }
+      for (const summary of antigravityEntries(rows, src.seat, cfg.roots)) {
+        const f = path.join(src.dir, 'conversations', `${summary.session}.db`)
+        const st = await stat(f).catch(() => null)
+        if (!st) {
+          file(summary)
+          continue
+        }
+        const wal = await stat(`${f}-wal`).catch(() => null)
+        const size = st.size + (wal?.size ?? 0)
+        const mtimeMs = Math.max(st.mtimeMs, wal?.mtimeMs ?? 0)
+        const cur = store.cursors[f]
+        if (cur && cur.size === size && cur.mtimeMs === mtimeMs) continue
+        files++
+        seats.add(src.seat)
+        let events
+        try {
+          events = conversationEvents(await readConversation(f, mtimeMs))
+        } catch (err) {
+          console.error(
+            'repo-pulse: antigravity conversation read failed',
+            f,
+            err instanceof Error ? err.message : err,
+          )
+          file(summary)
+          continue
+        }
+        if (!events.length) file(summary)
+        else if (store.remove(summary.key)) changed.push(summary)
+        events.forEach((ev, i) => {
+          file({
+            key: `a:${summary.session}:${ev.identities[0] ?? `#${i}`}`,
+            tool: 'antigravity',
+            seat: src.seat,
+            session: summary.session,
+            ts: ev.ts,
+            model: ev.model,
+            cwd: summary.cwd,
+            branch: null,
+            input: ev.input,
+            output: ev.output,
+            cacheWrite: ev.cacheWrite,
+            cacheRead: ev.cacheRead,
+            side: false,
+          })
+        })
+        store.cursors[f] = { size, mtimeMs, offset: size }
+      }
     } else if (src.tool === 'grok') {
       let dirs: string[] = []
       try {
