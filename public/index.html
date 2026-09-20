@@ -687,7 +687,7 @@
       .tiles {
         grid-column: span 12;
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(156px, 1fr));
         gap: 12px;
       }
       .tile {
@@ -705,12 +705,16 @@
         text-overflow: ellipsis;
       }
       .tile .value {
-        font-size: 22px;
+        font-size: 21px;
         font-weight: 600;
         letter-spacing: -0.02em;
-        line-height: 1.25;
-        margin-top: 2px;
-        white-space: nowrap;
+        line-height: 1.2;
+        margin-top: 3px;
+        overflow-wrap: anywhere;
+      }
+      .tile .value .a,
+      .tile .value .d {
+        display: inline-block;
       }
       .tile .value .a {
         color: var(--add);
@@ -727,10 +731,8 @@
       .tile .hint {
         font-size: 11px;
         color: var(--faint);
-        margin-top: 2px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        margin-top: 3px;
+        line-height: 1.4;
       }
       .tile .spark {
         display: block;
@@ -761,6 +763,10 @@
       }
       .chart .commit {
         fill: var(--commit);
+      }
+      .chart .clip {
+        stroke: var(--panel);
+        stroke-width: 2;
       }
       .chart .line {
         fill: none;

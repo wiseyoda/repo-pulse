@@ -995,7 +995,6 @@ function sparkline(values, w = 120, hgt = 22) {
   )
 }
 
-/** Diverging columns: lines added above the baseline, deleted below, commits as dots on it. */
 /** Card inner width for a span of the 12-column grid, so charts draw at the pixels they get. */
 function cardWidth(span) {
   const pad = innerWidth <= 960 ? 24 : 32
@@ -1003,26 +1002,44 @@ function cardWidth(span) {
   return Math.max(260, ((cols + 12) * span) / 12 - 12 - 30)
 }
 
+/** Axis ceiling: the 95th percentile of non-zero values, so one burst does not flatten the rest. */
+function axisCap(values) {
+  const nz = values.filter((v) => v > 0).sort((a, b) => a - b)
+  if (nz.length < 8) return { cap: Math.max(1, ...nz), clipped: 0 }
+  const p95 = nz[Math.min(nz.length - 1, Math.floor(nz.length * 0.95))]
+  const max = nz[nz.length - 1]
+  if (max <= p95 * 2) return { cap: max, clipped: 0 }
+  return { cap: p95, clipped: nz.filter((v) => v > p95).length }
+}
+
+function activityClip(buckets) {
+  const { cap, clipped } = axisCap(buckets.flatMap((b) => [b.added, b.deleted]))
+  return clipped ? ` · axis capped at ${compact(cap)}, ${plural(clipped, 'bar')} taller` : ''
+}
+
+/** Diverging columns: lines added above the baseline, deleted below, commits as dots on it. */
 function activityChart(buckets, bucketMs) {
   const W = cardWidth(12)
   const H = 150
-  const padL = 34
+  const padL = 40
   const padB = 18
   const mid = (H - padB) / 2
   const n = buckets.length
   const slot = (W - padL) / n
   const bw = Math.min(24, Math.max(1, slot - 2))
-  const max = Math.max(1, ...buckets.map((b) => Math.max(b.added, b.deleted)))
-  const scale = (v) => (v / max) * (mid - 6)
+  const { cap, clipped } = axisCap(buckets.flatMap((b) => [b.added, b.deleted]))
+  const scale = (v) => (Math.min(v, cap) / cap) * (mid - 6)
   const spanMs = n * bucketMs
   const ticks = []
   const every = Math.max(1, Math.round(n / 6))
-  for (let i = 0; i < n; i += every) ticks.push(i)
+  // Labels sit at the tick's left edge; drop any that would run past the right edge.
+  for (let i = 0; i < n; i += every) if (padL + i * slot < W - 48) ticks.push(i)
   const rows = buckets.map((b, i) => {
     const x = padL + i * slot + (slot - bw) / 2
     const cx = padL + i * slot + slot / 2
     const up = scale(b.added)
     const down = scale(b.deleted)
+    const r = Math.min(2, bw / 2)
     return svg(
       'g',
       {
@@ -1043,27 +1060,17 @@ function activityChart(buckets, bucketMs) {
         onmouseleave: hideTip,
       },
       svg('rect', { class: 'hit', x: padL + i * slot, y: 0, width: slot, height: H - padB }),
-      up > 0 &&
-        svg('rect', {
-          class: 'add',
-          x,
-          y: mid - up,
-          width: bw,
-          height: up,
-          rx: Math.min(2, bw / 2),
-        }),
-      down > 0 &&
-        svg('rect', {
-          class: 'del',
-          x,
-          y: mid + 1,
-          width: bw,
-          height: down,
-          rx: Math.min(2, bw / 2),
-        }),
+      up > 0 && svg('rect', { class: 'add', x, y: mid - up, width: bw, height: up, rx: r }),
+      b.added > cap &&
+        svg('line', { class: 'clip', x1: x, x2: x + bw, y1: mid - up + 3, y2: mid - up + 3 }),
+      down > 0 && svg('rect', { class: 'del', x, y: mid + 1, width: bw, height: down, rx: r }),
+      b.deleted > cap &&
+        svg('line', { class: 'clip', x1: x, x2: x + bw, y1: mid + down - 2, y2: mid + down - 2 }),
       b.commits > 0 && svg('circle', { class: 'commit', cx, cy: mid, r: 3.5 }),
     )
   })
+  const top = `${clipped ? '≥' : ''}+${compact(cap)}`
+  const bottom = `${clipped ? '≥' : ''}−${compact(cap)}`
   return svg(
     'svg',
     {
@@ -1074,12 +1081,8 @@ function activityChart(buckets, bucketMs) {
       'aria-label': 'Lines added and deleted over time',
     },
     svg('line', { class: 'grid-line', x1: padL, x2: W, y1: mid, y2: mid }),
-    svg('text', { class: 'axis', x: padL - 6, y: 10, 'text-anchor': 'end' }, `+${compact(max)}`),
-    svg(
-      'text',
-      { class: 'axis', x: padL - 6, y: H - padB - 2, 'text-anchor': 'end' },
-      `−${compact(max)}`,
-    ),
+    svg('text', { class: 'axis', x: padL - 6, y: 10, 'text-anchor': 'end' }, top),
+    svg('text', { class: 'axis', x: padL - 6, y: H - padB - 2, 'text-anchor': 'end' }, bottom),
     ...ticks.map((i) =>
       svg('text', { class: 'axis', x: padL + i * slot, y: H - 4 }, fmtTick(buckets[i].t, spanMs)),
     ),
@@ -1291,7 +1294,7 @@ function renderStats() {
       tile(
         'Active minutes',
         [String(tp.activeMinutes), state.window ? h('small', {}, `of ${windowMinutes}`) : null],
-        busiest ? `busiest ${busiest}` : 'no activity yet',
+        busiest ? `peak ${busiest}` : 'no activity yet',
       ),
       tile(
         'Edits',
@@ -1325,17 +1328,17 @@ function renderStats() {
           ' ',
           h('span', { class: 'd' }, `−${compact(unDeleted)}`),
         ],
-        `${plural(unFiles, 'file')} differ from HEAD`,
+        `${plural(unFiles, 'file')} changed`,
       ),
       tile(
-        'Longest quiet gap',
+        'Quiet gap',
         fmtDur(tp.gapMs),
         tp.gapEnd && tp.gapEnd < t - 1000 ? `ended ${fmtClock(tp.gapEnd)}` : 'still running',
       ),
     ),
     card(
       'Activity',
-      `lines per ${fmtDur(bucketMs)} · last ${label}`,
+      `lines per ${fmtDur(bucketMs)} · last ${label}${activityClip(buckets)}`,
       'full',
       activityChart(buckets, bucketMs),
     ),
