@@ -39,14 +39,14 @@ Requires Node 24+ and git. No runtime dependencies.
 
 ## Options
 
-| Flag              | Meaning                                                 |
-| ----------------- | ------------------------------------------------------- |
-| `-d`, `--detach`  | Run in the background; `repo-pulse --stop` ends it      |
-| `--no-open`       | Don't open the page                                     |
-| `--no-focus`      | Open the page without switching to it                   |
-| `--port <n>`      | Port (default 4747 or the next free one; `0` picks any) |
-| `--items <regex>` | Work-item id pattern for commit roll-ups                |
-| `--no-persist`    | Don't keep the edit log under `~/.repo-pulse`           |
+| Flag                 | Meaning                                                   |
+| -------------------- | --------------------------------------------------------- |
+| `-f`, `--foreground` | Run attached to the terminal instead of in the background |
+| `--no-open`          | Don't open the page                                       |
+| `--no-focus`         | Open the page without switching to it                     |
+| `--port <n>`         | Port (default 4747 or the next free one; `0` picks any)   |
+| `--items <regex>`    | Work-item id pattern for commit roll-ups                  |
+| `--no-persist`       | Don't keep the edit log under `~/.repo-pulse`             |
 
 State lives under `~/.repo-pulse/<repo>-<id>/`: `events.jsonl` (edits and HEAD moves, kept for
 7 days), `server.json` (the running instance), and `server.log` when detached.

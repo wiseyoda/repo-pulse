@@ -14,8 +14,9 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
 
 ## Commands
 
-- `pnpm start [path] [-d] [--no-open] [--port N]` — run against a repo (default: cwd); opens the
-  page by default, as a cmux browser tab in the caller's pane when inside cmux
+- `pnpm start [path] [-f] [--no-open] [--port N]` — run against a repo (default: cwd); detaches
+  into the background by default (`-f` stays attached) and opens the page, as a cmux browser
+  tab in the caller's pane when inside cmux; `--stop` ends the background instance
 - `pnpm verify` — typecheck + prettier + vitest; run before reporting anything done
 - `pnpm test` — vitest only (`test/git.integration.test.ts` drives a real temp git repo)
 

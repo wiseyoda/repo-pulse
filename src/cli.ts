@@ -23,12 +23,13 @@ const DETACH_WAIT_MS = 8000
 const HELP = `repo-pulse [path] [options]
 
 Live activity feed for a git repo: every edit, its size, and the diff.
-Run it from any directory inside a repo. Inside cmux the page opens as a
-browser tab in the pane you ran it from; elsewhere in your default browser.
+Run it from any directory inside a repo. It keeps running in the background
+after the terminal closes; stop it with --stop. Inside cmux the page opens as
+a browser tab in the pane you ran it from; elsewhere in your default browser.
 Running it again for a repo that already has a feed just opens that feed.
 
 Options:
-  -d, --detach     Run in the background and return the terminal
+  -f, --foreground Run attached to this terminal (logs here, Ctrl-C stops it)
   --stop           Stop the background instance for this repo
   --no-open        Do not open the page
   --no-focus       Open the page without switching to it
@@ -68,7 +69,7 @@ function parseArgs(argv: string[]): Options {
     port: null,
     open: true,
     focus: true,
-    detach: false,
+    detach: true,
     stop: false,
     itemPattern: DEFAULT_ITEM_PATTERN,
     persist: true,
@@ -83,6 +84,7 @@ function parseArgs(argv: string[]): Options {
     else if (arg === '--no-open') opts.open = false
     else if (arg === '--no-focus') opts.focus = false
     else if (arg === '-d' || arg === '--detach') opts.detach = true
+    else if (arg === '-f' || arg === '--foreground') opts.detach = false
     else if (arg === '--stop') opts.stop = true
     else if (arg === '--items') opts.itemPattern = argv[++i] ?? DEFAULT_ITEM_PATTERN
     else if (arg === '--no-persist') opts.persist = false
@@ -312,8 +314,9 @@ async function detach(
   const logFile = path.join(stateDir, 'server.log')
   const out = openSync(logFile, 'w')
   const args = process.argv.slice(2).filter((a) => a !== '-d' && a !== '--detach')
-  // The child opens nothing; this process does, so the tab lands in the caller's pane.
-  args.push('--no-open')
+  // The child runs attached to nothing; this process opens the page, so the tab lands in
+  // the caller's pane.
+  args.push('--foreground', '--no-open')
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], {
     detached: true,
     stdio: ['ignore', out, out],
