@@ -30,6 +30,10 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
   page (`cmux new-surface` in the caller's pane when inside cmux, else the default browser)
 - `src/instances.ts` — the instance registry (`~/.repo-pulse/*/server.json` + `/api/health`),
   duration parsing, and the pure idle-stop rule
+- `src/usage.ts` — LLM usage: source discovery (`~/.claude*`, `~/.codex*`, `~/.grok*`), pure
+  parsers per tool that mirror ccusage's dedupe rules, the keyed entry store under
+  `~/.repo-usage/<repo>/`, and the incremental scan. `src/prices.ts` is the LiteLLM price
+  book; `src/usage-tracker.ts` owns config, scan timer, and pricing for one repo
 - `bin/repo-pulse` — shim; symlinked from `~/.local/bin/repo-pulse`
 
 ## Rules
@@ -46,6 +50,11 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
 - One state dir per repo, keyed by the main worktree, so every worktree shares one log and one instance.
 - An instance stops itself after `--idle` (default 2h) with no SSE viewer and no repo event; never
   while a page is connected. Replayed history at start does not count as activity.
+- Usage tracking is opt-in per repo and reads usage/metadata fields only, never transcript
+  content. Claude streams rewrite a message several times: keep the copy with the largest
+  total, non-sidechain preferred, keyed on (message id, request id). Codex forks replay history
+  as a sub-second burst at the head of the file: skip it. Subagent transcripts sit under
+  `<session>/subagents/`, so the Claude walk must go several levels deep.
 
 ## Traps
 
