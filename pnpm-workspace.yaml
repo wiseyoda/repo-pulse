@@ -1,6 +1,3 @@
+# vitest depends on esbuild, whose install script pnpm blocks unless it is allowed here.
 allowBuilds:
-  esbuild: set this to true or false
-
-# vitest depends on esbuild, whose install script pnpm blocks unless it is listed here.
-onlyBuiltDependencies:
-  - esbuild
+  esbuild: true
