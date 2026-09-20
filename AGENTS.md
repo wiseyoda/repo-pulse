@@ -54,7 +54,10 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
   content. Claude streams rewrite a message several times: keep the copy with the largest
   total, non-sidechain preferred, keyed on (message id, request id). Codex forks replay history
   as a sub-second burst at the head of the file: skip it. Subagent transcripts sit under
-  `<session>/subagents/`, so the Claude walk must go several levels deep.
+  `<session>/subagents/`, so the Claude walk must go several levels deep. A Codex rollout's
+  `session_meta` line can run past 4 KB, so read to its newline, not a fixed head. Antigravity
+  is read through `node:sqlite` (built in, still zero dependencies); bump `CURSOR_VERSION` in
+  `src/usage.ts` whenever a cached skip decision could change.
 
 ## Traps
 

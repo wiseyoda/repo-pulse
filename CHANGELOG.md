@@ -16,5 +16,5 @@ All notable changes are listed here. The format follows
 - Markdown files open rendered with the diff painted on; Rendered/Diff toggle; line wrap.
 - Narrow layout with tabs for pane-width windows; scroll-anchored feed with a new-rows pill.
 - Opt-in LLM usage view: per-repo token usage and API-equivalent cost from Claude Code, Codex,
-  and Grok transcripts on this machine, with cost per commit and per 100 lines, trends by tool
+  Grok, and Antigravity data on this machine, with cost per commit and per 100 lines, trends by tool
   and token class, and breakdowns by model, work item, branch, and account.

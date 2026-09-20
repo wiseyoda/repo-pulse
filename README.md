@@ -110,8 +110,10 @@ log, so it works for any repo:
 An opt-in view (`u`, or `/#usage`) of what the coding agents working in this repo cost. Enable
 it once per repo and repo-pulse reads the transcripts on this machine whose working directory
 is inside the repo: Claude Code (every `~/.claude*` config dir, subagents included), Codex
-(`~/.codex*` rollouts), and Grok (`~/.grok` sessions). Only usage and metadata fields are read
-(tokens, model, timestamp, working directory, branch), never message content.
+(`~/.codex*` rollouts), Grok (`~/.grok` sessions), and Antigravity (conversation summaries
+under `~/.gemini*/antigravity*`, which carry sessions and steps but no tokens, so they show as
+activity and stay unpriced). Only usage and metadata fields are read (tokens, model,
+timestamp, working directory, branch), never message content.
 
 - Tiles: API-equivalent cost, tokens, cache hit rate, sessions, cost per commit, cost per 100
   lines changed.
@@ -161,6 +163,7 @@ was not running are invisible by nature, which is why starting it before a long 
 | `--stop-all`         | Stop every instance                                                             |
 | `--idle <time>`      | Stop after this long with no viewer and no activity (default `2h`; `off` never) |
 | `-f`, `--foreground` | Run attached to the terminal instead of in the background                       |
+| `?window=24h`        | URL query that pins the time window, for links (`/?window=24h#usage`)           |
 | `--no-open`          | Don't open the page                                                             |
 | `--no-focus`         | Open the page without switching to it                                           |
 | `--port <n>`         | Port (default 4747 or the next free one; `0` picks any)                         |
