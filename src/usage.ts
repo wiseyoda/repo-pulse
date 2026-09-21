@@ -21,7 +21,7 @@ import { conversationEvents, readConversation } from './antigravity.ts'
 export type Tool = 'claude' | 'codex' | 'grok' | 'antigravity'
 export const TOOLS: Tool[] = ['claude', 'codex', 'grok', 'antigravity']
 /** Bump when cursor semantics change so cached skip decisions are re-made. */
-export const CURSOR_VERSION = 4
+export const CURSOR_VERSION = 6
 
 export interface UsageEntry {
   /** Stable identity so a re-read replaces rather than double counts. */
@@ -42,7 +42,7 @@ export interface UsageEntry {
   side: boolean
   /** Cost the tool itself reported in USD, when it does (Grok). */
   cost?: number
-  /** Model calls this entry stands for when it is a session roll-up (Grok, Antigravity). */
+  /** Model calls this entry stands for when it covers more than one (Grok, Antigravity). */
   calls?: number
 }
 
@@ -322,14 +322,59 @@ interface GrokCtx {
   seat: string
   session: string
   cwd: string
+  /** The session's events.jsonl, which times every model call (`loop_started`). */
+  events?: string
+  /** Session ids present on disk; a replayed turn whose origin is among them is skipped. */
+  sessions?: Set<string>
 }
 
+interface GrokTurnWindow {
+  start: number
+  end: number
+  loops: number[]
+}
+
+/** Turn windows and the model-call start times inside each, from a session's events.jsonl. */
+function grokTurnWindows(text: string): GrokTurnWindow[] {
+  const out: GrokTurnWindow[] = []
+  let cur: GrokTurnWindow | null = null
+  for (const line of text.split('\n')) {
+    if (!/"(turn_started|turn_ended|loop_started)"/.test(line)) continue
+    let r: any
+    try {
+      r = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const ts = Date.parse(r.ts)
+    if (!Number.isFinite(ts)) continue
+    if (r.type === 'turn_started') cur = { start: ts, end: ts, loops: [] }
+    else if (r.type === 'loop_started' && cur) cur.loops.push(ts)
+    else if (r.type === 'turn_ended' && cur) {
+      cur.end = ts
+      out.push(cur)
+      cur = null
+    }
+  }
+  return out
+}
+
+/** Splits `v` into `parts` integer shares that sum back to `v`. */
+const share = (v: number, i: number, parts: number) =>
+  Math.round((v * (i + 1)) / parts) - Math.round((v * i) / parts)
+
 /**
- * Grok's updates.jsonl carries a cumulative usage object per model; the last one is the
- * session's total, and `costUsdTicks` is Grok's own cost in 1e-10 USD.
+ * Grok's updates.jsonl logs one `turn_completed` line per prompt with that turn's usage per
+ * model (not a running total) and `costUsdTicks`, Grok's own cost in 1e-10 USD. Tokens are
+ * only reported per turn, but events.jsonl times each model call, so a turn's usage is spread
+ * evenly over its calls; a turn with no timings lands at its end. A resumed session replays
+ * its parent's turns at the head of the file with the line `timestamp` reset to the resume
+ * moment, but `_meta` keeps the original event id and millisecond time: when the origin
+ * session is on disk the replay is skipped, otherwise it is keyed and dated by that `_meta`.
  */
 export function parseGrokUpdates(text: string, ctx: GrokCtx): UsageEntry[] {
-  let latest: { ts: number; modelUsage: Record<string, any> } | null = null
+  const out: UsageEntry[] = []
+  const windows = ctx.events ? grokTurnWindows(ctx.events) : []
   const findUsage = (v: any, depth = 0): any => {
     if (!v || typeof v !== 'object' || depth > 6) return null
     if (v.usage && typeof v.usage === 'object' && v.usage.modelUsage) return v.usage
@@ -349,29 +394,48 @@ export function parseGrokUpdates(text: string, ctx: GrokCtx): UsageEntry[] {
     }
     const u = findUsage(r)
     if (!u) continue
+    const meta = r.params?._meta ?? r._meta ?? {}
     const raw = r.timestamp ?? r.ts
-    const ts = typeof raw === 'number' ? (raw < 1e12 ? raw * 1000 : raw) : Date.parse(raw)
+    const lineTs = typeof raw === 'number' ? (raw < 1e12 ? raw * 1000 : raw) : Date.parse(raw)
+    const ts = typeof meta.agentTimestampMs === 'number' ? meta.agentTimestampMs : lineTs
     if (!Number.isFinite(ts)) continue
-    latest = { ts, modelUsage: u.modelUsage }
+    const eventId = typeof meta.eventId === 'string' ? meta.eventId : null
+    const origin = eventId ? eventId.slice(0, eventId.lastIndexOf('-')) : ctx.session
+    const native = origin === ctx.session
+    if (!native && ctx.sessions?.has(origin)) continue
+    const prompt = r.params?.update?.prompt_id
+    const turn =
+      eventId ?? (typeof prompt === 'string' ? `${ctx.session}:${prompt}` : `${ctx.session}:${ts}`)
+    let loops: number[] = []
+    if (native && windows.length) {
+      const w = windows.reduce((a, b) => (Math.abs(b.end - ts) < Math.abs(a.end - ts) ? b : a))
+      if (Math.abs(w.end - ts) <= 5000) loops = w.loops
+    }
+    const parts = Math.max(1, loops.length)
+    for (const [model, m] of Object.entries(u.modelUsage) as [string, any][]) {
+      const input = Math.max(0, n(m.inputTokens) - n(m.cachedReadTokens))
+      for (let i = 0; i < parts; i++) {
+        out.push({
+          key: loops.length ? `g:${turn}:${model}:${i}` : `g:${turn}:${model}`,
+          tool: 'grok',
+          seat: ctx.seat,
+          session: ctx.session,
+          ts: loops[i] ?? ts,
+          model,
+          cwd: ctx.cwd,
+          branch: null,
+          input: share(input, i, parts),
+          cacheRead: share(n(m.cachedReadTokens), i, parts),
+          cacheWrite: share(n(m.cacheCreationTokens), i, parts),
+          output: share(n(m.outputTokens), i, parts),
+          side: false,
+          ...(typeof m.modelCalls === 'number' ? { calls: share(m.modelCalls, i, parts) } : {}),
+          ...(typeof m.costUsdTicks === 'number' ? { cost: m.costUsdTicks / 1e10 / parts } : {}),
+        })
+      }
+    }
   }
-  if (!latest) return []
-  return Object.entries(latest.modelUsage).map(([model, u]: [string, any]) => ({
-    key: `g:${ctx.session}:${model}`,
-    tool: 'grok' as const,
-    seat: ctx.seat,
-    session: ctx.session,
-    ts: latest!.ts,
-    model,
-    cwd: ctx.cwd,
-    branch: null,
-    input: Math.max(0, n(u.inputTokens) - n(u.cachedReadTokens)),
-    cacheRead: n(u.cachedReadTokens),
-    cacheWrite: n(u.cacheCreationTokens),
-    output: n(u.outputTokens),
-    side: false,
-    ...(typeof u.modelCalls === 'number' ? { calls: u.modelCalls } : {}),
-    ...(typeof u.costUsdTicks === 'number' ? { cost: u.costUsdTicks / 1e10 } : {}),
-  }))
+  return out
 }
 
 export interface AntigravityRow {
@@ -721,6 +785,8 @@ export async function scan(
       } catch {
         continue
       }
+      // Every session on disk, so a resumed session's replayed turns defer to their origin.
+      const byDir = new Map<string, { cwd: string; sessions: string[] }>()
       for (const enc of dirs) {
         let cwd: string
         try {
@@ -728,27 +794,37 @@ export async function scan(
         } catch {
           continue
         }
-        if (!underRoots(cwd, cfg.roots)) continue
-        let sessions: string[] = []
         try {
-          sessions = await readdir(path.join(src.dir, enc))
-        } catch {
-          continue
-        }
+          byDir.set(enc, { cwd, sessions: await readdir(path.join(src.dir, enc)) })
+        } catch {}
+      }
+      const known = new Set([...byDir.values()].flatMap((d) => d.sessions))
+      for (const [enc, { cwd, sessions }] of byDir) {
+        if (!underRoots(cwd, cfg.roots)) continue
         for (const sid of sessions) {
-          const f = path.join(src.dir, enc, sid, 'updates.jsonl')
+          const dir = path.join(src.dir, enc, sid)
+          const f = path.join(dir, 'updates.jsonl')
           const st = await stat(f).catch(() => null)
           if (!st) continue
           const cur = store.cursors[f]
           if (cur && cur.size === st.size && cur.mtimeMs === st.mtimeMs) continue
           files++
           seats.add(src.seat)
-          for (const e of parseGrokUpdates(await readFile(f, 'utf8'), {
+          const entries = parseGrokUpdates(await readFile(f, 'utf8'), {
             seat: src.seat,
             session: sid,
             cwd,
-          }))
-            file(e)
+            events: await readFile(path.join(dir, 'events.jsonl'), 'utf8').catch(() => undefined),
+            sessions: known,
+          })
+          // Earlier versions stored one roll-up per session (`g:<session>:<model>`), then one
+          // per turn (`g:<event>:<model>`); both give way to the per-call entries.
+          for (const e of entries) {
+            store.remove(`g:${sid}:${e.model}`)
+            const m = /^(.*):\d+$/.exec(e.key)
+            if (m) store.remove(m[1]!)
+          }
+          entries.forEach(file)
           store.cursors[f] = { size: st.size, mtimeMs: st.mtimeMs, offset: st.size }
         }
       }

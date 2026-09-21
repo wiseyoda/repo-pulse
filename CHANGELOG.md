@@ -18,3 +18,5 @@ All notable changes are listed here. The format follows
 - Opt-in LLM usage view: per-repo token usage and API-equivalent cost from Claude Code, Codex,
   Grok, and Antigravity transcripts on this machine, with cost per commit and per 100 lines, trends by tool
   and token class, and breakdowns by model, work item, branch, and account.
+  Grok usage, which its logs only report per turn, is spread over the turn's timed model
+  calls; resumed sessions' replayed turns defer to the original session.

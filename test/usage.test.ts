@@ -221,43 +221,146 @@ describe('parseCodexFile', () => {
 })
 
 describe('parseGrokUpdates', () => {
-  it('takes the last cumulative usage per model and Grok’s own cost', () => {
-    const upd = (ts: number, calls: number) =>
-      JSON.stringify({
-        method: 'session/update',
-        timestamp: ts,
-        params: {
+  const turn = (
+    ts: number,
+    calls: number,
+    opts: { prompt?: string; meta?: { eventId: string; agentTimestampMs: number } } = {},
+  ) =>
+    JSON.stringify({
+      method: '_x.ai/session/update',
+      timestamp: ts,
+      params: {
+        sessionId: 'sid',
+        update: {
+          sessionUpdate: 'turn_completed',
+          prompt_id: opts.prompt ?? `p${calls}`,
           usage: {
             inputTokens: 1000 * calls,
             cachedReadTokens: 600 * calls,
             outputTokens: 50 * calls,
             costUsdTicks: 1e9 * calls,
+            modelCalls: calls,
             modelUsage: {
               'grok-4.6-build': {
                 inputTokens: 1000 * calls,
                 cachedReadTokens: 600 * calls,
                 cacheCreationTokens: 0,
                 outputTokens: 50 * calls,
+                modelCalls: calls,
                 costUsdTicks: 1e9 * calls,
               },
             },
           },
         },
-      })
-    const out = parseGrokUpdates([upd(1789590000, 1), upd(1789590300, 3)].join('\n'), {
-      seat: 'grok',
-      session: 'sid',
-      cwd: ROOT,
+        ...(opts.meta ? { _meta: opts.meta } : {}),
+      },
     })
+  const ctx = { seat: 'grok', session: 'sid', cwd: ROOT }
+
+  it('emits one entry per completed turn with that turn’s usage and Grok’s own cost', () => {
+    const out = parseGrokUpdates(
+      [
+        turn(1789590000, 1, { meta: { eventId: 'sid-10', agentTimestampMs: 1789590000123 } }),
+        turn(1789590300, 3, { meta: { eventId: 'sid-40', agentTimestampMs: 1789590300456 } }),
+      ].join('\n'),
+      ctx,
+    )
     expect(out).toEqual([
       expect.objectContaining({
-        key: 'g:sid:grok-4.6-build',
+        key: 'g:sid-10:grok-4.6-build',
+        input: 400,
+        cacheRead: 600,
+        output: 50,
+        cost: 0.1,
+        calls: 1,
+        ts: 1789590000123,
+      }),
+      expect.objectContaining({
+        key: 'g:sid-40:grok-4.6-build',
         input: 1200,
         cacheRead: 1800,
         output: 150,
         cost: 0.3,
-        ts: 1789590300000,
+        calls: 3,
+        ts: 1789590300456,
       }),
+    ])
+  })
+
+  it('dates a replayed turn by its original event, not the resume', () => {
+    const meta = { eventId: 'parent-7', agentTimestampMs: 1789580000999 }
+    const original = parseGrokUpdates(turn(1789580001, 2, { prompt: 'p', meta }), {
+      ...ctx,
+      session: 'parent',
+    })
+    const replay = parseGrokUpdates(
+      [turn(1789590000, 2, { prompt: 'p', meta }), turn(1789590200, 5)].join('\n'),
+      ctx,
+    )
+    expect(replay[0]).toEqual(
+      expect.objectContaining({ key: original[0]!.key, ts: 1789580000999, calls: 2 }),
+    )
+    expect(replay[1]).toEqual(
+      expect.objectContaining({ key: 'g:sid:p5:grok-4.6-build', ts: 1789590200000, calls: 5 }),
+    )
+  })
+
+  it('skips a replayed turn when its origin session is on disk', () => {
+    const meta = { eventId: 'parent-7', agentTimestampMs: 1789580000999 }
+    const out = parseGrokUpdates(
+      [turn(1789590000, 2, { prompt: 'p', meta }), turn(1789590200, 5)].join('\n'),
+      { ...ctx, sessions: new Set(['parent', 'sid']) },
+    )
+    expect(out.map((e) => e.key)).toEqual(['g:sid:p5:grok-4.6-build'])
+  })
+
+  it('spreads a turn over its timed model calls, keeping the totals', () => {
+    const ev = (ts: string, type: string, extra = {}) => JSON.stringify({ ts, type, ...extra })
+    const events = [
+      ev('2026-09-21T04:14:46.589Z', 'turn_started', { turn_number: 0 }),
+      ev('2026-09-21T04:14:49.444Z', 'loop_started', { loop_index: 0 }),
+      ev('2026-09-21T04:14:52.965Z', 'first_token'),
+      ev('2026-09-21T04:16:01.197Z', 'loop_started', { loop_index: 1 }),
+      ev('2026-09-21T04:20:00.000Z', 'loop_started', { loop_index: 2 }),
+      ev('2026-09-21T04:32:29.900Z', 'turn_ended', { outcome: 'completed' }),
+      // A later turn still running has no end yet and must not capture the first one.
+      ev('2026-09-21T04:37:51.329Z', 'turn_started', { turn_number: 1 }),
+      ev('2026-09-21T04:37:52.000Z', 'loop_started', { loop_index: 0 }),
+    ].join('\n')
+    const endMs = Date.parse('2026-09-21T04:32:29.912Z')
+    const out = parseGrokUpdates(
+      turn(Math.floor(endMs / 1000), 4, { meta: { eventId: 'sid-99', agentTimestampMs: endMs } }),
+      { ...ctx, events },
+    )
+    expect(out.map((e) => e.key)).toEqual([
+      'g:sid-99:grok-4.6-build:0',
+      'g:sid-99:grok-4.6-build:1',
+      'g:sid-99:grok-4.6-build:2',
+    ])
+    expect(out.map((e) => e.ts)).toEqual([
+      Date.parse('2026-09-21T04:14:49.444Z'),
+      Date.parse('2026-09-21T04:16:01.197Z'),
+      Date.parse('2026-09-21T04:20:00.000Z'),
+    ])
+    const sum = (k: 'input' | 'cacheRead' | 'output' | 'calls' | 'cost') =>
+      out.reduce((a, e) => a + (e[k] ?? 0), 0)
+    expect(sum('input')).toBe(1600)
+    expect(sum('cacheRead')).toBe(2400)
+    expect(sum('output')).toBe(200)
+    expect(sum('calls')).toBe(4)
+    expect(sum('cost')).toBeCloseTo(0.4, 9)
+    expect(out.map((e) => e.calls)).toEqual([1, 2, 1])
+    expect(out.every((e) => Number.isInteger(e.input) && Number.isInteger(e.output))).toBe(true)
+  })
+
+  it('lands a turn at its end when the events file has no window for it', () => {
+    const endMs = 1789590300456
+    const out = parseGrokUpdates(
+      turn(1789590300, 3, { meta: { eventId: 'sid-40', agentTimestampMs: endMs } }),
+      { ...ctx, events: JSON.stringify({ ts: '2026-09-21T00:00:00Z', type: 'turn_started' }) },
+    )
+    expect(out).toEqual([
+      expect.objectContaining({ key: 'g:sid-40:grok-4.6-build', ts: endMs, calls: 3 }),
     ])
   })
 })
