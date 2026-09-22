@@ -7,6 +7,11 @@ import {
   compact,
   extMix,
   feedTotals,
+  fleetCoverageSummary,
+  fleetDays,
+  fleetGroup,
+  fleetIdentityNotes,
+  fleetTotals,
   fmtUsd,
   groupUsage,
   isTestPath,
@@ -14,6 +19,7 @@ import {
   magnitudeWidth,
   mergeFeed,
   numberDiff,
+  repostatSummary,
   relativeTime,
   rollupCommits,
   sizeTrend,
@@ -52,7 +58,9 @@ const state = {
   view: 'feed',
   mdMode: 'rendered',
   repoStats: null, // { at, days, commits, files } from /api/stats
+  health: { byWt: new Map(), loadingWt: null, request: 0 },
   usage: { status: null, entries: [], preview: [], at: 0, loading: false, error: null },
+  fleet: { status: null, at: 0, loading: false, error: null },
   selectedKey: null,
   flashIds: new Set(),
   pending: 0, // live rows not yet rendered because the reader has scrolled down
@@ -75,6 +83,7 @@ const els = {
   tabs: $('tabs'),
   view: $('view'),
   stats: $('panel-stats'),
+  health: $('panel-health'),
   usage: $('panel-usage'),
   tip: $('tip'),
   grid: document.querySelector('.grid'),
@@ -220,6 +229,7 @@ function flush() {
   if (parts.has('items')) renderItems()
   if (parts.has('status')) renderStatus()
   if (parts.has('stats') && state.view === 'stats') renderStats()
+  if (parts.has('health') && state.view === 'health') renderHealth()
   if (parts.has('usage') && state.view === 'usage') renderUsage()
 }
 // One render per frame however many events arrive. Frames stop in a background tab, so a
@@ -231,7 +241,8 @@ function invalidate(...parts) {
   if (document.hidden) setTimeout(flush, 0)
   else requestAnimationFrame(flush)
 }
-const renderAll = () => invalidate('header', 'feed', 'tree', 'items', 'status', 'stats', 'usage')
+const renderAll = () =>
+  invalidate('header', 'feed', 'tree', 'items', 'status', 'stats', 'health', 'usage')
 
 function renderHeader() {
   if (!state.repo) return
@@ -252,6 +263,7 @@ function renderHeader() {
             state.wtFilter = on ? null : wt.id
             state.pending = 0
             renderAll()
+            if (state.view === 'health') loadHealth()
           },
         },
         wt.branch ?? 'detached',
@@ -489,10 +501,8 @@ function showPill() {
 }
 
 function updateTitle() {
-  const name = state.repo?.name ?? 'repo-pulse'
-  document.title = state.pending
-    ? `(${state.pending}) ${name} · repo-pulse`
-    : `${name} · repo-pulse`
+  const name = state.repo?.name ?? 'Pulse'
+  document.title = state.pending ? `(${state.pending}) ${name} · Pulse` : `${name} · Pulse`
 }
 
 /** Live rows land immediately unless the reader has scrolled into history; then they queue behind a pill. */
@@ -691,6 +701,19 @@ function setOnline(on) {
 
 function tickAges() {
   const t = now()
+  const fleet = state.fleet.status
+  if (fleet?.selection && !fleet.stale) {
+    const times = [
+      fleet.fetchedAt,
+      Date.parse(fleet.selection.generatedAt),
+      Date.parse(fleet.selection.asOf),
+    ]
+    if (times.some((at) => !Number.isFinite(at) || at > t || t - at > fleet.staleAfterMs)) {
+      fleet.stale = true
+      fleet.state = 'stale'
+      invalidate('usage')
+    }
+  }
   for (const el of document.querySelectorAll('[data-ts]')) {
     const ts = Number(el.dataset.ts)
     if (ts) el.textContent = relativeTime(ts, t)
@@ -1435,6 +1458,194 @@ function renderStats() {
   )
 }
 
+// --- repository health -------------------------------------------------------
+
+function healthWorktree() {
+  if (state.wtFilter) return state.worktrees.find((wt) => wt.id === state.wtFilter) ?? null
+  return state.worktrees.length === 1 ? state.worktrees[0] : null
+}
+
+function healthPicker() {
+  return h(
+    'div',
+    { class: 'card enable health-picker' },
+    h('h3', {}, 'Choose a worktree'),
+    h('p', {}, 'Repository health is scanned per worktree and is never merged across branches.'),
+    h(
+      'div',
+      { class: 'actions' },
+      ...state.worktrees.map((wt) =>
+        h(
+          'button',
+          {
+            class: 'btn',
+            onclick: () => {
+              state.wtFilter = wt.id
+              renderAll()
+              loadHealth()
+            },
+          },
+          wt.branch ?? wt.head?.slice(0, 7) ?? 'detached',
+        ),
+      ),
+    ),
+  )
+}
+
+function healthRows(rows, { name, max, value }) {
+  return rows.length
+    ? barList(rows, {
+        name,
+        max,
+        value,
+      })
+    : emptyNote('No hotspots reported.')
+}
+
+function renderHealth() {
+  if (!state.loaded) return
+  const wt = healthWorktree()
+  if (!wt) {
+    els.health.replaceChildren(healthPicker())
+    return
+  }
+  const result = state.health.byWt.get(wt.id)
+  if (!result) {
+    els.health.replaceChildren(
+      h('div', { class: 'empty' }, state.health.loadingWt === wt.id ? 'Scanning…' : 'Loading…'),
+    )
+    return
+  }
+  if (!result.metrics) {
+    els.health.replaceChildren(
+      h(
+        'div',
+        { class: 'card enable health-unavailable' },
+        h('h3', {}, 'Repository health unavailable'),
+        h('p', {}, result.error ?? 'Stats did not return a snapshot.'),
+        h('div', { class: 'path' }, result.root ?? wt.path),
+        h(
+          'div',
+          { class: 'actions' },
+          h('button', { class: 'btn primary', onclick: () => loadHealth(true) }, 'Try again'),
+        ),
+      ),
+    )
+    return
+  }
+
+  const metrics = result.metrics
+  const summary = repostatSummary(metrics)
+  const sourceBits = [
+    metrics.source.gitSha ? `HEAD ${metrics.source.gitSha.slice(0, 12)}` : 'no Git HEAD',
+    ' · scanned ',
+    result.scannedAt
+      ? [h('span', { dataset: { ts: result.scannedAt } }, relativeTime(result.scannedAt, now()))]
+      : 'scan time unknown',
+  ]
+  const notice = result.error
+    ? `Last refresh failed: ${result.error}. Showing the last good snapshot.`
+    : result.stale
+      ? 'Repository changed after this snapshot. Refresh to scan the current worktree.'
+      : 'Deterministic Stats snapshot'
+
+  els.health.replaceChildren(
+    h(
+      'div',
+      { class: `card full health-source${result.error ? ' error' : result.stale ? ' stale' : ''}` },
+      h('h3', {}, 'Source', h('span', { class: 'sub' }, ...sourceBits.flat())),
+      h('code', { title: metrics.source.canonicalRoot }, metrics.source.canonicalRoot),
+      h(
+        'div',
+        { class: 'health-meta' },
+        h('span', {}, notice),
+        h(
+          'button',
+          {
+            class: 'btn',
+            disabled: state.health.loadingWt === wt.id,
+            onclick: () => loadHealth(true),
+          },
+          state.health.loadingWt === wt.id ? 'Scanning…' : 'Refresh',
+        ),
+      ),
+    ),
+    h(
+      'div',
+      { class: 'tiles' },
+      tile('Files', compact(summary.files), `${compact(summary.codeLines)} lines of code`),
+      tile(
+        'Complexity',
+        compact(summary.maxCyclomatic),
+        `maximum cyclomatic · ${compact(summary.maxCognitive)} cognitive`,
+      ),
+      tile(
+        'Documentation',
+        summary.documentationRatio === null ? '—' : pct(summary.documentationRatio),
+        metrics.documentation
+          ? `${compact(metrics.documentation.fileCount)} documentation files`
+          : 'not available',
+      ),
+      tile(
+        'Skipped files',
+        compact(summary.skippedFiles),
+        summary.skippedFiles ? 'excluded from deterministic analysis' : 'none',
+      ),
+    ),
+    card(
+      'Complexity hotspots',
+      'maximum cyclomatic complexity',
+      'half',
+      healthRows(summary.hotspots.slice(0, 8), {
+        name: (row) => `${row.file} · ${row.function}`,
+        max: (row) => row.cyclomatic,
+        value: (row) => `${row.cyclomatic} cyclomatic · ${row.cognitive} cognitive`,
+      }),
+    ),
+    card(
+      'Risk hotspots',
+      'complexity combined with Git churn',
+      'half',
+      healthRows(summary.risks.slice(0, 8), {
+        name: (row) => row.file,
+        max: (row) => row.maxComplexity,
+        value: (row) => `${row.maxComplexity} complexity · ${row.churnCount} churn`,
+      }),
+    ),
+  )
+}
+
+async function loadHealth(force = false) {
+  const wt = healthWorktree()
+  if (!wt) return invalidate('health')
+  const cached = state.health.byWt.get(wt.id)
+  if (!force && cached && !cached.stale) return invalidate('health')
+  if (state.health.loadingWt === wt.id) return
+  const request = ++state.health.request
+  state.health.loadingWt = wt.id
+  invalidate('health')
+  try {
+    const response = await fetch(
+      `/api/repostat?wt=${encodeURIComponent(wt.id)}${force ? '&refresh=1' : ''}`,
+    )
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`)
+    state.health.byWt.set(wt.id, result)
+  } catch (error) {
+    const previous = state.health.byWt.get(wt.id)
+    state.health.byWt.set(wt.id, {
+      root: previous?.root ?? wt.path,
+      stale: true,
+      scannedAt: previous?.scannedAt ?? null,
+      error: error instanceof Error ? error.message : String(error),
+      metrics: previous?.metrics ?? null,
+    })
+  } finally {
+    if (state.health.request === request) state.health.loadingWt = null
+    invalidate('health')
+  }
+}
+
 // --- llm usage -----------------------------------------------------------------
 
 const TOOL_LABEL = {
@@ -1628,18 +1839,344 @@ function usageEnableCard() {
   )
 }
 
+// --- fleet history (optional, from Usage) -------------------------------------
+
+async function loadFleet(force = false) {
+  const f = state.fleet
+  if (f.loading) return
+  if (!force && f.at) return
+  f.loading = true
+  try {
+    const response = await fetch(`/api/fleet-usage${force ? '?refresh=1' : ''}`)
+    const body = await response.json()
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    f.status = body
+    f.error = null
+  } catch (error) {
+    f.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    f.at = Date.now()
+    f.loading = false
+    invalidate('usage')
+  }
+}
+
+function fleetSetupCard(status) {
+  const configPath = status?.configPath ?? '~/.repo-pulse/<repo>-<id>/fleet-usage.json'
+  return h(
+    'div',
+    { class: 'card full enable fleet-setup' },
+    h('h3', {}, 'Fleet history', h('span', { class: 'sub' }, 'optional · not configured')),
+    h(
+      'p',
+      {},
+      'Usage can publish an ',
+      h('code', {}, 'accounts.repository-usage.v1'),
+      ' export of this repository’s fleet-wide usage. It stays separate from the local numbers above: the export has no shared event IDs, so the two are never added together or deduplicated.',
+    ),
+    status?.configError
+      ? h('p', { class: 'fleet-error' }, `Configuration problem: ${status.configError}`)
+      : h(
+          'p',
+          { class: 'muted' },
+          'Write ',
+          h('code', {}, configPath),
+          ' with the export location and the repository ID used in the producer mappings. Nothing is requested or scanned until that file exists.',
+        ),
+    h(
+      'div',
+      { class: 'actions' },
+      h('button', { class: 'btn', onclick: () => loadFleet(true) }, 'Re-read configuration'),
+    ),
+  )
+}
+
+function fleetHostRows(summary, t) {
+  return h(
+    'div',
+    { class: 'tbl fleet-hosts' },
+    h(
+      'div',
+      { class: 'th' },
+      ...['host', 'collection', 'last collected', 'usage through', 'notes'].map((label) =>
+        h('span', {}, label),
+      ),
+    ),
+    ...summary.hosts.map((host) =>
+      h(
+        'div',
+        { class: 'tr', title: host.incompleteReasons.join(', ') || 'no reported gaps' },
+        h('span', { class: 'mono' }, host.hostId),
+        h(
+          'span',
+          {},
+          host.latestCollectionFailed
+            ? 'last attempt failed'
+            : host.state === 'aggregate-observed'
+              ? 'observed'
+              : 'incomplete',
+        ),
+        h(
+          'span',
+          {},
+          host.collectedAt
+            ? `${relativeTime(host.collectedAt, t)} before as-of`
+            : 'never collected',
+        ),
+        h('span', { class: 'mono' }, host.observedUsageEnd ?? '–'),
+        h('span', {}, host.incompleteReasons.length ? host.incompleteReasons.join(', ') : '–'),
+      ),
+    ),
+  )
+}
+
+/**
+ * The fleet cards. Always labelled as whole calendar days over the export's own interval,
+ * never merged with the local minute-window totals above.
+ */
+function fleetCards() {
+  const f = state.fleet
+  if (!f.at && !f.loading) loadFleet()
+  const status = f.status
+  if (!status) {
+    return [
+      h(
+        'div',
+        { class: 'card full note' },
+        h(
+          'span',
+          {},
+          f.error ? `Could not read fleet history: ${f.error}` : 'Loading fleet history…',
+        ),
+      ),
+    ]
+  }
+  if (!status.configured) return [fleetSetupCard(status)]
+
+  const t = now()
+  const selection = status.selection
+  const source = `${status.sourceKind === 'url' ? 'URL' : 'file'} · ${status.sourceLabel ?? '–'}`
+  const stateNote = status.error
+    ? `Last read failed: ${status.error}.${selection ? ' Showing the last good export.' : ''}`
+    : status.stale
+      ? 'This export is older than the freshness budget; refresh to read it again.'
+      : 'Read from the configured export.'
+  const header = h(
+    'div',
+    {
+      class: `card full fleet-source${status.error ? ' error' : status.stale ? ' stale' : ''}`,
+    },
+    h(
+      'h3',
+      {},
+      'Fleet history',
+      h(
+        'span',
+        { class: 'sub' },
+        selection
+          ? `${selection.requestedInterval.startDateInclusive} → ${selection.requestedInterval.endDateInclusive} · ${selection.requestedInterval.timezone}`
+          : 'no export loaded',
+      ),
+    ),
+    h('code', { title: status.sourceLabel ?? '' }, source),
+    h(
+      'div',
+      { class: 'fleet-meta' },
+      h(
+        'span',
+        {},
+        `${stateNote} Repository ID `,
+        h('b', {}, status.repositoryId ?? '–'),
+        status.hostIds.length
+          ? ` · hosts ${status.hostIds.join(', ')}`
+          : ' · all hosts in the export',
+      ),
+      h(
+        'span',
+        { class: 'actions' },
+        status.fleetHistoryUrl
+          ? h(
+              'a',
+              {
+                class: 'btn',
+                href: status.fleetHistoryUrl,
+                target: '_blank',
+                rel: 'noreferrer noopener',
+              },
+              'Fleet dashboard',
+            )
+          : null,
+        h(
+          'button',
+          { class: 'btn', disabled: f.loading, onclick: () => loadFleet(true) },
+          f.loading ? 'Reading…' : 'Refresh',
+        ),
+      ),
+    ),
+  )
+
+  if (!selection) {
+    return [
+      header,
+      h(
+        'div',
+        { class: 'card full enable fleet-unavailable' },
+        h('h3', {}, 'Fleet history unavailable'),
+        h('p', {}, status.error ?? 'The configured export has not been read yet.'),
+        h('p', { class: 'muted' }, 'Local usage, activity, diffs and health are unaffected.'),
+      ),
+    ]
+  }
+
+  const rows = selection.rows
+  const tot = fleetTotals(rows)
+  const coverage = fleetCoverageSummary(selection.coverage, selection.asOf)
+  const notes = fleetIdentityNotes(rows)
+  const days = fleetDays(rows, selection.requestedInterval)
+  const asOf = Date.parse(selection.asOf)
+  const valueHint = tot.unpricedRows
+    ? `${tot.unpricedRows} of ${tot.rows} rows unpriced`
+    : 'API-equivalent, not cash'
+  const unmatched = selection.unmatched
+
+  return [
+    header,
+    h(
+      'div',
+      { class: 'tiles' },
+      tile(
+        'Fleet tokens',
+        compact(tot.tokens),
+        `${compact(tot.output)} output · ${plural(tot.rows, 'aggregate row')}`,
+      ),
+      tile('API-equivalent value', tot.usd === null ? 'unknown' : fmtUsd(tot.usd), valueHint),
+      tile(
+        'Days with usage',
+        String(tot.days.length),
+        `of ${plural(days.length, 'day')} in the export interval`,
+      ),
+      tile(
+        'Hosts',
+        String(tot.hosts.length),
+        tot.hosts.length ? tot.hosts.join(' · ') : 'no matching host',
+      ),
+    ),
+    h(
+      'div',
+      { class: 'card full note fleet-note' },
+      h(
+        'span',
+        {},
+        `${selection.aggregateAuthority.relationshipToFleetTotals}. Whole calendar days in ${selection.requestedInterval.timezone} (${selection.requestedInterval.dateSemantics}), as of ${Number.isFinite(asOf) ? `${fmtDay(asOf)} ${fmtClock(asOf)}` : selection.asOf}. `,
+        selection.eventLineage.eventIdsAvailable
+          ? 'The export carries source event IDs.'
+          : 'The export carries no source event IDs, so fleet and local usage cannot be reconciled row by row: never add them together.',
+        ' The export has no branch or worktree dimension, so these totals cover the whole repository, not the selected worktree.',
+      ),
+    ),
+    card(
+      'Fleet usage by day',
+      `whole calendar days · ${selection.requestedInterval.timezone}`,
+      'full',
+      rows.length
+        ? barList(days.filter((day) => day.tokens > 0).slice(-30), {
+            name: (day) => day.date,
+            max: (day) => day.tokens,
+            value: (day) =>
+              `${compact(day.tokens)}${day.unpricedRows ? ' · value unknown' : ` · ${fmtUsd(day.usd)}`}`,
+          })
+        : emptyNote('No fleet rows matched this repository ID in the export interval.'),
+    ),
+    card(
+      'By host',
+      'fleet aggregate rows',
+      '',
+      rows.length
+        ? barList(
+            fleetGroup(rows, (row) => row.hostId),
+            {
+              name: (row) => row.key,
+              max: (row) => row.tokens,
+              value: (row) =>
+                `${compact(row.tokens)} · ${row.usd === null ? 'value unknown' : fmtUsd(row.usd)}`,
+            },
+          )
+        : emptyNote('Nothing matched.'),
+    ),
+    card(
+      'By source',
+      'agent home on the collecting host',
+      '',
+      rows.length
+        ? barList(fleetGroup(rows, (row) => row.sourceId).slice(0, 8), {
+            name: (row) => row.key,
+            max: (row) => row.tokens,
+            value: (row) =>
+              `${compact(row.tokens)} · ${row.usd === null ? 'value unknown' : fmtUsd(row.usd)}`,
+          })
+        : emptyNote('Nothing matched.'),
+    ),
+    card(
+      'By model',
+      'fleet aggregates',
+      '',
+      rows.length
+        ? barList(fleetGroup(rows, (row) => row.model).slice(0, 8), {
+            name: (row) => row.key,
+            max: (row) => row.tokens,
+            value: (row) =>
+              `${compact(row.tokens)} · ${row.usd === null ? 'value unknown' : fmtUsd(row.usd)}`,
+          })
+        : emptyNote('Nothing matched.'),
+    ),
+    card(
+      'Host coverage',
+      coverage.complete
+        ? 'every host observed'
+        : `${coverage.incomplete} of ${coverage.total} incomplete`,
+      'full',
+      coverage.total
+        ? fleetHostRows(coverage, Number.isFinite(asOf) ? asOf : t)
+        : emptyNote('The export reported no host coverage.'),
+    ),
+    h(
+      'div',
+      { class: 'card full note fleet-note' },
+      h(
+        'span',
+        {},
+        `Identity: ${notes.identityConfidence.map((x) => `${x.key} ${x.rows}`).join(' · ') || 'no rows'}`,
+        notes.weakestIdentity && notes.weakestIdentity !== 'high'
+          ? ` · some rows matched with ${notes.weakestIdentity} repository-identity confidence`
+          : '',
+        `. Time allocation: ${notes.temporalConfidence.map((x) => `${x.key} ${x.rows}`).join(' · ') || 'no rows'}`,
+        notes.aggregateBases.length
+          ? ` (${notes.aggregateBases.map((x) => x.key).join(', ')})`
+          : '',
+        `. Unassociated in this export: ${plural(unmatched.rows, 'row')} across ${unmatched.repositories} other ${unmatched.repositories === 1 ? 'repository' : 'repositories'}`,
+        unmatched.hostsOutsideScope
+          ? ` · ${plural(unmatched.hostsOutsideScope, 'matching host')} outside the configured host scope`
+          : '',
+        '. Configured subscription price and actually billed cash are not included here: the export leaves them unallocated and unevidenced.',
+      ),
+    ),
+  ]
+}
+
 function renderUsage() {
   if (!state.loaded) return
   const u = state.usage
   if (!u.status) {
     els.usage.replaceChildren(
       h('div', { class: 'empty' }, u.error ? `Could not load usage: ${u.error}` : 'Loading…'),
+      ...fleetCards(),
     )
     if (!u.loading && !u.error) loadUsage()
     return
   }
   if (!u.status.enabled) {
-    els.usage.replaceChildren(usageEnableCard())
+    // Local transcript usage stays opt-in; the fleet slice is independent of it.
+    els.usage.replaceChildren(usageEnableCard(), ...fleetCards())
     return
   }
   const t = now()
@@ -1698,6 +2235,15 @@ function renderUsage() {
   )
 
   els.usage.replaceChildren(
+    h(
+      'div',
+      { class: 'card full note local-scope' },
+      h(
+        'span',
+        {},
+        'Local transcript usage from this machine, over the selected page window. Fleet history is a separate section below and is never added to these numbers.',
+      ),
+    ),
     h(
       'div',
       { class: 'tiles' },
@@ -1869,6 +2415,7 @@ function renderUsage() {
         h('button', { class: 'btn', onclick: () => usagePost('/api/usage/disable') }, 'Disable'),
       ),
     ),
+    ...fleetCards(),
   )
 }
 
@@ -1925,6 +2472,8 @@ document.addEventListener('keydown', (ev) => {
     els.filter.select()
   } else if (ev.key === 's') {
     setView(state.view === 'stats' ? 'feed' : 'stats')
+  } else if (ev.key === 'h') {
+    setView(state.view === 'health' ? 'feed' : 'health')
   } else if (ev.key === 'u') {
     setView(state.view === 'usage' ? 'feed' : 'usage')
   } else if (ev.key === 'g') {
@@ -2015,20 +2564,25 @@ function setPanelTab(panel) {
   for (const id of ['feed', 'tree', 'items']) $(`panel-${id}`).classList.toggle('on', id === panel)
 }
 
-const VIEW_OF_PANEL = { stats: 'stats', usage: 'usage' }
+const VIEW_OF_PANEL = { stats: 'stats', health: 'health', usage: 'usage' }
 
-/** Feed (the three panels), Stats, or Usage fill the same area; only one is live. */
+/** Feed (the three panels), Stats, Health, or Usage fill the same area; only one is live. */
 function setView(view) {
   state.view = view
   for (const b of els.view.querySelectorAll('button'))
     b.classList.toggle('on', b.dataset.view === view)
   els.grid.hidden = view !== 'feed'
   els.stats.hidden = view !== 'stats'
+  els.health.hidden = view !== 'health'
   els.usage.hidden = view !== 'usage'
   if (view === 'stats') {
     if (state.panel !== 'stats') setPanelTab('stats')
     invalidate('stats')
     loadRepoStats()
+  } else if (view === 'health') {
+    if (state.panel !== 'health') setPanelTab('health')
+    invalidate('health')
+    loadHealth()
   } else if (view === 'usage') {
     if (state.panel !== 'usage') setPanelTab('usage')
     invalidate('usage')
@@ -2065,6 +2619,7 @@ async function loadState() {
   const s = await fetch('/api/state').then((r) => r.json())
   replaceState(s)
   renderAll()
+  if (state.view === 'health') loadHealth()
   openFromHash()
 }
 
@@ -2107,6 +2662,12 @@ function connect() {
   es.addEventListener('usage', () => {
     if (state.usage.status?.enabled) scheduleUsageReload()
   })
+  es.addEventListener('repostat', (message) => {
+    const { wt } = JSON.parse(message.data)
+    const cached = state.health.byWt.get(wt)
+    if (cached) state.health.byWt.set(wt, { ...cached, stale: true })
+    invalidate('health')
+  })
   es.addEventListener('snapshot', (m) => {
     const sn = JSON.parse(m.data)
     state.snapshots.set(sn.wt.id, sn)
@@ -2121,6 +2682,7 @@ function connect() {
     if (state.wtFilter && !state.worktrees.some((w) => w.id === state.wtFilter))
       state.wtFilter = null
     renderAll()
+    if (state.view === 'health') loadHealth()
   })
 }
 
@@ -2161,11 +2723,11 @@ try {
   state.mdMode = localStorage.getItem('repo-pulse.mdMode') === 'diff' ? 'diff' : 'rendered'
   const theme = localStorage.getItem('repo-pulse.theme')
   setTheme(THEMES.includes(theme) ? theme : 'auto')
-  const wanted = ['#stats', '#usage', '#feed'].includes(location.hash)
+  const wanted = ['#stats', '#health', '#usage', '#feed'].includes(location.hash)
     ? location.hash.slice(1)
     : null
   const view = wanted ?? localStorage.getItem('repo-pulse.view')
-  if (view === 'stats' || view === 'usage') setView(view)
+  if (view === 'stats' || view === 'health' || view === 'usage') setView(view)
 } catch {
   setTheme('auto')
   setWrap(true)
@@ -2178,7 +2740,7 @@ loadState()
   .catch((err) => {
     console.error(err)
     els.feed.replaceChildren(
-      h('div', { class: 'empty' }, 'Could not reach repo-pulse. Is the server running?'),
+      h('div', { class: 'empty' }, 'Could not reach Pulse. Is aimux-pulse running?'),
     )
     els.status.className = 'status down'
     els.status.textContent = 'server unreachable'

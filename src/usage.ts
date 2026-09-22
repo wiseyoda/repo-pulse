@@ -726,7 +726,7 @@ export async function scan(
         }
       } catch (err) {
         console.error(
-          'repo-pulse: antigravity read failed',
+          'aimux-pulse: antigravity read failed',
           err instanceof Error ? err.message : err,
         )
         continue
@@ -750,7 +750,7 @@ export async function scan(
           events = conversationEvents(await readConversation(f, mtimeMs))
         } catch (err) {
           console.error(
-            'repo-pulse: antigravity conversation read failed',
+            'aimux-pulse: antigravity conversation read failed',
             f,
             err instanceof Error ? err.message : err,
           )

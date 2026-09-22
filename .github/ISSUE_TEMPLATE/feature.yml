@@ -1,5 +1,5 @@
 name: Feature request
-description: Something repo-pulse could show or do
+description: Something Pulse could show or do
 labels: [enhancement]
 body:
   - type: textarea

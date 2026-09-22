@@ -128,6 +128,30 @@ export function feedTotals(rows) {
   return { added, deleted, edits, commits }
 }
 
+/** Small, display-ready repository-health summary without inventing an overall grade. */
+export function repostatSummary(metrics) {
+  const hotspots = [...metrics.hotspots].sort(
+    (a, b) =>
+      b.cyclomatic - a.cyclomatic || b.cognitive - a.cognitive || a.file.localeCompare(b.file),
+  )
+  const risks = [...metrics.riskHotspots].sort(
+    (a, b) =>
+      b.maxComplexity - a.maxComplexity ||
+      b.churnCount - a.churnCount ||
+      a.file.localeCompare(b.file),
+  )
+  return {
+    files: metrics.totalFiles,
+    codeLines: metrics.totalLines.code,
+    maxCyclomatic: hotspots[0]?.cyclomatic ?? 0,
+    maxCognitive: Math.max(0, ...hotspots.map((hotspot) => hotspot.cognitive)),
+    documentationRatio: metrics.documentation?.docToCodeRatio ?? null,
+    skippedFiles: metrics.skippedFiles,
+    hotspots,
+    risks,
+  }
+}
+
 // --- stats -------------------------------------------------------------------
 
 /** Bucket width that gives a window roughly 40-90 columns. */
@@ -415,4 +439,182 @@ export function fmtUsd(n) {
   if (n >= 10) return `$${n.toFixed(1)}`
   if (n >= 0.01) return `$${n.toFixed(2)}`
   return n > 0 ? '<$0.01' : '$0'
+}
+
+// --- fleet usage (accounts.repository-usage.v1) -------------------------------
+// Authoritative whole-calendar-day fleet aggregates with no shared event IDs. These
+// helpers never combine a fleet row with a local transcript entry: no sum, no dedupe.
+
+const FLEET_TOKENS = (row) =>
+  row.counts.input + row.counts.output + row.counts.cacheWrite + row.counts.cacheRead
+
+/**
+ * Totals for the matched repository. `usd` stays null when any row is unpriced, so an
+ * unknown API-equivalent value is never shown as a smaller known number.
+ */
+export function fleetTotals(rows) {
+  const t = {
+    tokens: 0,
+    input: 0,
+    output: 0,
+    cacheWrite: 0,
+    cacheRead: 0,
+    rows: rows.length,
+    usd: 0,
+    unpricedRows: 0,
+    subscriptionRows: 0,
+    billedRows: 0,
+  }
+  const hosts = new Set()
+  const sources = new Set()
+  const models = new Set()
+  const days = new Set()
+  for (const row of rows) {
+    t.input += row.counts.input
+    t.output += row.counts.output
+    t.cacheWrite += row.counts.cacheWrite
+    t.cacheRead += row.counts.cacheRead
+    t.tokens += FLEET_TOKENS(row)
+    const usd = row.valuation.usageDateApiEquivalentUsd
+    if (usd === null || usd === undefined) t.unpricedRows++
+    else t.usd += usd
+    if (row.valuation.configuredSubscriptionCostUsd !== null) t.subscriptionRows++
+    if (row.valuation.actualBilledCashUsd !== null) t.billedRows++
+    hosts.add(row.hostId)
+    sources.add(row.sourceId)
+    models.add(row.model)
+    days.add(row.date)
+  }
+  const prompt = t.input + t.cacheWrite + t.cacheRead
+  return {
+    ...t,
+    usd: t.unpricedRows ? null : t.usd,
+    pricedUsd: t.usd,
+    cacheHit: prompt ? t.cacheRead / prompt : 0,
+    hosts: [...hosts].sort(),
+    sources: [...sources].sort(),
+    models: [...models].sort(),
+    days: [...days].sort(),
+  }
+}
+
+/** Fleet rows grouped by `keyOf`, sorted by known value then tokens. */
+export function fleetGroup(rows, keyOf) {
+  const m = new Map()
+  for (const row of rows) {
+    const key = keyOf(row)
+    const g = m.get(key) ?? { key, tokens: 0, output: 0, usd: 0, unpricedRows: 0, rows: 0 }
+    g.rows++
+    g.tokens += FLEET_TOKENS(row)
+    g.output += row.counts.output
+    const usd = row.valuation.usageDateApiEquivalentUsd
+    if (usd === null || usd === undefined) g.unpricedRows++
+    else g.usd += usd
+    m.set(key, g)
+  }
+  return [...m.values()]
+    .map((g) => ({ ...g, usd: g.unpricedRows ? null : g.usd, pricedUsd: g.usd }))
+    .sort((a, b) => b.pricedUsd - a.pricedUsd || b.tokens - a.tokens || a.key.localeCompare(b.key))
+}
+
+/**
+ * One entry per calendar day of the export interval, ascending, including days with no
+ * rows. Days come from the export's own dates; the page's minute window never reshapes them.
+ */
+export function fleetDays(rows, interval) {
+  const byDay = new Map()
+  for (const row of rows) {
+    const day = byDay.get(row.date) ?? { date: row.date, tokens: 0, usd: 0, unpricedRows: 0 }
+    day.tokens += FLEET_TOKENS(row)
+    const usd = row.valuation.usageDateApiEquivalentUsd
+    if (usd === null || usd === undefined) day.unpricedRows++
+    else day.usd += usd
+    byDay.set(row.date, day)
+  }
+  if (!interval) {
+    return [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date))
+  }
+  const out = []
+  const end = Date.parse(`${interval.endDateInclusive}T00:00:00Z`)
+  let at = Date.parse(`${interval.startDateInclusive}T00:00:00Z`)
+  if (!Number.isFinite(at) || !Number.isFinite(end) || end < at) {
+    return [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date))
+  }
+  // A long interval is still bounded: one entry per day, at most ~2 years.
+  for (let guard = 0; at <= end && guard < 800; guard++, at += 86_400_000) {
+    const date = new Date(at).toISOString().slice(0, 10)
+    out.push(byDay.get(date) ?? { date, tokens: 0, usd: 0, unpricedRows: 0 })
+  }
+  return out
+}
+
+/** Host collection freshness and the export's own incompleteness reasons. */
+export function fleetCoverageSummary(coverage, asOf) {
+  const at = typeof asOf === 'string' ? Date.parse(asOf) : asOf
+  const reasons = new Map()
+  let incomplete = 0
+  let failed = 0
+  let neverCollected = 0
+  let oldestSuccess = null
+  const hosts = coverage.map((host) => {
+    const collectedAt = host.lastSuccessfulCollectionAt
+      ? Date.parse(host.lastSuccessfulCollectionAt)
+      : null
+    if (host.state !== 'aggregate-observed') incomplete++
+    if (host.latestCollectionFailed) failed++
+    if (collectedAt === null) neverCollected++
+    else if (oldestSuccess === null || collectedAt < oldestSuccess) oldestSuccess = collectedAt
+    for (const reason of host.incompleteReasons) reasons.set(reason, (reasons.get(reason) ?? 0) + 1)
+    return {
+      hostId: host.hostId,
+      state: host.state,
+      collectedAt,
+      behindMs: collectedAt !== null && Number.isFinite(at) ? Math.max(0, at - collectedAt) : null,
+      latestCollectionFailed: host.latestCollectionFailed,
+      observedUsageEnd: host.observedUsageEnd,
+      incompleteReasons: host.incompleteReasons,
+    }
+  })
+  return {
+    hosts: hosts.sort((a, b) => a.hostId.localeCompare(b.hostId)),
+    total: coverage.length,
+    incomplete,
+    failed,
+    neverCollected,
+    oldestSuccess,
+    complete: coverage.length > 0 && incomplete === 0,
+    reasons: [...reasons.entries()]
+      .map(([reason, hosts_]) => ({ reason, hosts: hosts_ }))
+      .sort((a, b) => b.hosts - a.hosts || a.reason.localeCompare(b.reason)),
+  }
+}
+
+/** How the matched rows were identified and placed in time, for the uncertainty label. */
+export function fleetIdentityNotes(rows) {
+  const identity = new Map()
+  const temporal = new Map()
+  const bases = new Map()
+  for (const row of rows) {
+    identity.set(
+      row.repositoryIdentityConfidence,
+      (identity.get(row.repositoryIdentityConfidence) ?? 0) + 1,
+    )
+    temporal.set(
+      row.temporalAllocationConfidence,
+      (temporal.get(row.temporalAllocationConfidence) ?? 0) + 1,
+    )
+    bases.set(row.aggregateBasis, (bases.get(row.aggregateBasis) ?? 0) + 1)
+  }
+  const rank = ['low', 'medium', 'high']
+  const weakest = (counts) =>
+    rank.find((level) => counts.has(level)) ?? (counts.size ? [...counts.keys()][0] : null)
+  const entries = (counts) =>
+    [...counts.entries()].map(([key, n]) => ({ key, rows: n })).sort((a, b) => b.rows - a.rows)
+  return {
+    identityConfidence: entries(identity),
+    temporalConfidence: entries(temporal),
+    aggregateBases: entries(bases),
+    weakestIdentity: weakest(identity),
+    weakestTemporal: weakest(temporal),
+  }
 }

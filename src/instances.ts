@@ -5,7 +5,7 @@ import path from 'node:path'
 export const STATE_DIR = path.join(os.homedir(), '.repo-pulse')
 const HEALTH_TIMEOUT_MS = 1500
 
-/** What a running instance leaves behind so a later `repo-pulse` for the same repo can find it. */
+/** What a running instance leaves behind so a later `aimux-pulse` can find it. */
 export interface Instance {
   pid: number
   port: number
@@ -16,7 +16,7 @@ export interface Instance {
 /** What a live instance reports about itself. */
 export interface Health {
   ok: true
-  name: 'repo-pulse'
+  name: 'aimux-pulse'
   root: string
   pid: number
   port: number
@@ -44,7 +44,7 @@ export async function health(port: number): Promise<Health | null> {
     })
     if (!res.ok) return null
     const body = (await res.json()) as Partial<Health>
-    return body.name === 'repo-pulse' && body.root && body.pid ? (body as Health) : null
+    return body.name === 'aimux-pulse' && body.root && body.pid ? (body as Health) : null
   } catch {
     return null
   }

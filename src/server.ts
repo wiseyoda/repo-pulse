@@ -3,8 +3,10 @@ import { readFile } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { FleetUsageTracker } from './fleet-usage.ts'
 import { commitPatch, fileDiff, fileMix, readCommits, type Worktree } from './git.ts'
 import { stopsAt, type Health } from './instances.ts'
+import type { RepostatTracker } from './repostat.ts'
 import type { EventStore } from './store.ts'
 import type { UsageTracker } from './usage-tracker.ts'
 
@@ -18,7 +20,9 @@ export interface ServerOptions {
   /** Idle budget in ms (0 = never stop) and the last repo event, for the health report. */
   idleMs: number
   lastEventAt(): number
+  repostat: RepostatTracker
   usage: UsageTracker
+  fleet: FleetUsageTracker
 }
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
@@ -53,6 +57,11 @@ function sameOrigin(req: http.IncomingMessage): boolean {
   }
 }
 
+/** Resolve only an explicit ID from the server's current worktree inventory. */
+export function requestedWorktree(worktrees: Worktree[], id: string | null): Worktree | null {
+  return worktrees.find((worktree) => worktree.id === id) ?? null
+}
+
 export class PulseServer {
   readonly server: http.Server
   private readonly clients = new Set<http.ServerResponse>()
@@ -69,7 +78,7 @@ export class PulseServer {
     this.opts = opts
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err: unknown) => {
-        console.error('repo-pulse: request failed', err)
+        console.error('aimux-pulse: request failed', err)
         if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' })
         res.end('error')
       })
@@ -131,7 +140,9 @@ export class PulseServer {
     if (method === 'GET' && url.pathname === '/events') return this.stream(req, res)
     if (method === 'GET' && url.pathname === '/api/state') return this.json(res, this.state())
     if (method === 'GET' && url.pathname === '/api/health') return this.json(res, this.health())
+    if (method === 'GET' && url.pathname === '/api/repostat') return this.repostat(url, res)
     if (method === 'GET' && url.pathname === '/api/usage') return this.usage(url, res)
+    if (method === 'GET' && url.pathname === '/api/fleet-usage') return this.fleetUsage(url, res)
     if (method === 'POST' && url.pathname === '/api/usage/enable')
       return this.usageToggle(res, true)
     if (method === 'POST' && url.pathname === '/api/usage/disable')
@@ -147,13 +158,13 @@ export class PulseServer {
     res.end('not found')
   }
 
-  /** Enough for a second `repo-pulse` to recognise this one, and for `repo-pulse ps` to describe it. */
+  /** Enough for another `aimux-pulse` process to recognise and describe this instance. */
   private health(): Health {
     const now = Date.now()
     const lastEventAt = this.opts.lastEventAt()
     return {
       ok: true,
-      name: 'repo-pulse',
+      name: 'aimux-pulse',
       root: this.opts.root,
       pid: process.pid,
       port: this.port,
@@ -186,6 +197,20 @@ export class PulseServer {
     })
   }
 
+  /**
+   * The optional fleet slice for the configured repository. Only `refresh` is accepted:
+   * the source and repository ID come from owner config, never from the browser.
+   */
+  private async fleetUsage(url: URL, res: http.ServerResponse): Promise<void> {
+    const refresh = url.searchParams.get('refresh') === '1'
+    try {
+      this.json(res, await this.opts.fleet.get(refresh))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.json(res, { ...this.opts.fleet.status(), error: message })
+    }
+  }
+
   private async usageToggle(res: http.ServerResponse, on: boolean): Promise<void> {
     if (on) await this.opts.usage.enable()
     else await this.opts.usage.disable()
@@ -195,6 +220,23 @@ export class PulseServer {
   private async usageScan(res: http.ServerResponse): Promise<void> {
     const changed = await this.opts.usage.scanNow()
     this.json(res, { changed, ...this.opts.usage.status() })
+  }
+
+  private async repostat(url: URL, res: http.ServerResponse): Promise<void> {
+    const wt = requestedWorktree(this.opts.worktrees(), url.searchParams.get('wt'))
+    if (!wt) return this.json(res, { error: 'unknown worktree' }, 400)
+    try {
+      this.json(res, await this.opts.repostat.get(wt.path, url.searchParams.get('refresh') === '1'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.json(res, {
+        root: wt.path,
+        stale: true,
+        scannedAt: null,
+        error: `Stats scan failed: ${message}`,
+        metrics: null,
+      })
+    }
   }
 
   /** Repo-level figures the page cannot derive from live events: 30 days of commit sizes and the file mix. */
@@ -227,8 +269,8 @@ export class PulseServer {
     }
   }
 
-  private json(res: http.ServerResponse, body: unknown): void {
-    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' })
+  private json(res: http.ServerResponse, body: unknown, status = 200): void {
+    res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-cache' })
     res.end(JSON.stringify(body))
   }
 

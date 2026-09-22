@@ -1,4 +1,7 @@
-# repo-pulse
+# Pulse
+
+Local checkout: `pulse/`; the public command/package is `aimux-pulse`. Keep existing state paths.
+Stats lives in `../stats/`; Usage lives in `../usage/`. These are separate repositories.
 
 Live activity feed for a git repo. Watches every worktree, turns each write into an edit event
 with its size, and streams it to a local page with diff drill-in and commits rolled up by work item.
@@ -30,11 +33,14 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
   page (`cmux new-surface` in the caller's pane when inside cmux, else the default browser)
 - `src/instances.ts` — the instance registry (`~/.repo-pulse/*/server.json` + `/api/health`),
   duration parsing, and the pure idle-stop rule
+- `src/fleet-usage.ts` — optional consumer of Usage's `accounts.repository-usage.v1` export:
+  owner config and last-good cache in the repo's Repo Pulse state dir, payload validation, and the
+  repository-scoped projection behind `/api/fleet-usage`
 - `src/usage.ts` — LLM usage: source discovery (`~/.claude*`, `~/.codex*`, `~/.grok*`), pure
   parsers per tool that mirror ccusage's dedupe rules, the keyed entry store under
   `~/.repo-usage/<repo>/`, and the incremental scan. `src/prices.ts` is the LiteLLM price
   book; `src/usage-tracker.ts` owns config, scan timer, and pricing for one repo
-- `bin/repo-pulse` — shim; symlinked from `~/.local/bin/repo-pulse`
+- `bin/aimux-pulse` — shim; symlinked from `~/.local/bin/aimux-pulse`
 
 ## Rules
 
@@ -50,6 +56,14 @@ Observes only: no hooks, no agent integration, works for any agent or human edit
 - One state dir per repo, keyed by the main worktree, so every worktree shares one log and one instance.
 - An instance stops itself after `--idle` (default 2h) with no SSE viewer and no repo event; never
   while a page is connected. Replayed history at start does not count as activity.
+- Fleet history is optional and inert without `fleet-usage.json` in the state dir: no discovery,
+  no background polling, no request. The export is authoritative whole-calendar-day aggregates
+  with no shared event IDs, so it is never summed with local transcript usage and never
+  deduplicated against it; matching is by the stable `repositoryId` shared with the producer
+  mappings, never by basename, remote name or worktree dir. Only allowlisted schema fields cross
+  the boundary (the producer's quota observations must not reach the page), the browser cannot
+  choose a path or URL, upstream bodies are never surfaced, and the cache lives beside the event
+  log rather than in `~/.repo-usage/` or the watched repo.
 - Usage tracking is opt-in per repo and reads usage/metadata fields only, never transcript
   content. Claude streams rewrite a message several times: keep the copy with the largest
   total, non-sidechain preferred, keyed on (message id, request id). Codex forks replay history

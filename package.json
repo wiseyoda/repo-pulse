@@ -1,5 +1,5 @@
 {
-  "name": "repo-pulse",
+  "name": "aimux-pulse",
   "version": "0.1.0",
   "description": "Live activity feed for a git repo: every edit, its size, and the diff, as agents make them.",
   "keywords": [
@@ -29,7 +29,7 @@
     "node": ">=24"
   },
   "bin": {
-    "repo-pulse": "bin/repo-pulse"
+    "aimux-pulse": "bin/aimux-pulse"
   },
   "files": [
     "bin",

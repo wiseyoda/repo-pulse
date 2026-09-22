@@ -7,6 +7,7 @@ import {
   compact,
   extMix,
   isTestPath,
+  repostatSummary,
   sizeTrend,
   tempo,
   testShare,
@@ -140,5 +141,35 @@ describe('extMix / compact', () => {
     expect(compact(1284)).toBe('1,284')
     expect(compact(12_900)).toBe('12.9K')
     expect(compact(-1_234_567)).toBe('-1.2M')
+  })
+})
+
+describe('repostatSummary', () => {
+  it('sorts deterministic hotspots and exposes measurements without grading them', () => {
+    const summary = repostatSummary({
+      totalFiles: 9,
+      totalLines: { code: 120 },
+      hotspots: [
+        { file: 'a.ts', function: 'a', cyclomatic: 3, cognitive: 8, lines: 10 },
+        { file: 'b.ts', function: 'b', cyclomatic: 7, cognitive: 4, lines: 20 },
+      ],
+      documentation: { docToCodeRatio: 0.2 },
+      skippedFiles: 2,
+      riskHotspots: [
+        { file: 'a.ts', churnCount: 10, maxComplexity: 3 },
+        { file: 'b.ts', churnCount: 2, maxComplexity: 7 },
+      ],
+    })
+    expect(summary).toMatchObject({
+      files: 9,
+      codeLines: 120,
+      maxCyclomatic: 7,
+      maxCognitive: 8,
+      documentationRatio: 0.2,
+      skippedFiles: 2,
+    })
+    expect(summary.hotspots.map((row) => row.file)).toEqual(['b.ts', 'a.ts'])
+    expect(summary.risks.map((row) => row.file)).toEqual(['b.ts', 'a.ts'])
+    expect(summary).not.toHaveProperty('grade')
   })
 })

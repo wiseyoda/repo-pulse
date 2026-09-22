@@ -153,7 +153,7 @@ export class UsageTracker {
       if (result.changed.length) this.onChange(result.changed.length)
       return result.changed.length
     } catch (err) {
-      console.error('repo-pulse: usage scan failed', err instanceof Error ? err.message : err)
+      console.error('aimux-pulse: usage scan failed', err instanceof Error ? err.message : err)
       return 0
     } finally {
       this.scanning = false

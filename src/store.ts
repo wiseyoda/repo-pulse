@@ -118,7 +118,7 @@ export class EventStore {
       await writeFile(tmp, kept.map((ev) => JSON.stringify(ev) + '\n').join(''))
       await rename(tmp, this.logPath)
     } catch (err) {
-      console.error('repo-pulse: could not compact event log', err)
+      console.error('aimux-pulse: could not compact event log', err)
     }
   }
 
@@ -176,7 +176,7 @@ export class EventStore {
         await mkdir(path.dirname(logPath), { recursive: true })
         await appendFile(logPath, JSON.stringify(ev) + '\n')
       })
-      .catch((err: unknown) => console.error('repo-pulse: could not persist event', err))
+      .catch((err: unknown) => console.error('aimux-pulse: could not persist event', err))
   }
 
   /** The page keeps its own window filter; this trims what the initial payload carries. */

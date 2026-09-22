@@ -43,6 +43,36 @@ export function feedTotals(rows: { type: string; dAdded?: number; dDeleted?: num
   commits: number
 }
 
+export interface RepostatHotspot {
+  file: string
+  function: string
+  cyclomatic: number
+  cognitive: number
+  lines: number
+}
+export interface RepostatRisk {
+  file: string
+  churnCount: number
+  maxComplexity: number
+}
+export function repostatSummary(metrics: {
+  totalFiles: number
+  totalLines: { code: number }
+  hotspots: RepostatHotspot[]
+  documentation: { docToCodeRatio: number } | null
+  skippedFiles: number
+  riskHotspots: RepostatRisk[]
+}): {
+  files: number
+  codeLines: number
+  maxCyclomatic: number
+  maxCognitive: number
+  documentationRatio: number | null
+  skippedFiles: number
+  hotspots: RepostatHotspot[]
+  risks: RepostatRisk[]
+}
+
 export interface EditLike {
   ts: number
   path: string
@@ -158,3 +188,68 @@ export function usageSessions(entries: UsageLike[]): {
   n: number
 }[]
 export function fmtUsd(n: number): string
+
+import type { FleetCoverageHost, FleetInterval, FleetUsageRow } from '../src/fleet-usage.ts'
+
+export function fleetTotals(rows: FleetUsageRow[]): {
+  tokens: number
+  input: number
+  output: number
+  cacheWrite: number
+  cacheRead: number
+  rows: number
+  usd: number | null
+  pricedUsd: number
+  unpricedRows: number
+  subscriptionRows: number
+  billedRows: number
+  cacheHit: number
+  hosts: string[]
+  sources: string[]
+  models: string[]
+  days: string[]
+}
+export function fleetGroup(
+  rows: FleetUsageRow[],
+  keyOf: (row: FleetUsageRow) => string,
+): {
+  key: string
+  tokens: number
+  output: number
+  usd: number | null
+  pricedUsd: number
+  unpricedRows: number
+  rows: number
+}[]
+export function fleetDays(
+  rows: FleetUsageRow[],
+  interval?: FleetInterval | null,
+): { date: string; tokens: number; usd: number; unpricedRows: number }[]
+export function fleetCoverageSummary(
+  coverage: FleetCoverageHost[],
+  asOf: string | number,
+): {
+  hosts: {
+    hostId: string
+    state: string
+    collectedAt: number | null
+    behindMs: number | null
+    latestCollectionFailed: boolean
+    observedUsageEnd: string | null
+    incompleteReasons: string[]
+  }[]
+  total: number
+  incomplete: number
+  failed: number
+  neverCollected: number
+  oldestSuccess: number | null
+  complete: boolean
+  reasons: { reason: string; hosts: number }[]
+}
+export function fleetIdentityNotes(rows: FleetUsageRow[]): {
+  identityConfidence: { key: string; rows: number }[]
+  temporalConfidence: { key: string; rows: number }[]
+  aggregateBases: { key: string; rows: number }[]
+  weakestIdentity: string | null
+  weakestTemporal: string | null
+}

@@ -1,6 +1,6 @@
 # Security
 
-repo-pulse runs a local HTTP server. Its threat model is a page you open yourself, on your
+Pulse runs a local HTTP server. Its threat model is a page you open yourself, on your
 own machine, against a repository you already have read access to. It:
 
 - binds `127.0.0.1` only and refuses requests whose `Host` is not loopback (DNS rebinding);

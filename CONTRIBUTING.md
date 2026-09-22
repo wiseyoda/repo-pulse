@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for looking. repo-pulse is small on purpose: zero runtime dependencies, Node runs the
+Thanks for looking. Pulse is small on purpose: zero runtime dependencies, Node runs the
 TypeScript directly, and the page is plain HTML and ES modules. Keep it that way.
 
 ## Setup

@@ -16,6 +16,8 @@ import {
   type Instance,
 } from './instances.ts'
 import { PulseServer } from './server.ts'
+import { FleetUsageTracker } from './fleet-usage.ts'
+import { RepostatTracker, statsCommand } from './repostat.ts'
 import { EventStore } from './store.ts'
 import { UsageTracker } from './usage-tracker.ts'
 import { RepoWatcher } from './watcher.ts'
@@ -29,8 +31,8 @@ const CMUX_DEFAULT = '/Applications/cmux.app/Contents/Resources/bin/cmux'
 const DETACH_WAIT_MS = 8000
 const IDLE_CHECK_MS = 60_000
 
-const HELP = `repo-pulse [path] [options]
-repo-pulse ps | --stop | --stop-all
+const HELP = `aimux-pulse [path] [options]
+aimux-pulse ps | --stop | --stop-all
 
 Live activity feed for a git repo: every edit, its size, and the diff.
 Run it from any directory inside a repo. It keeps running in the background
@@ -69,7 +71,7 @@ interface Options {
 }
 
 function fail(msg: string, code = 2): never {
-  process.stderr.write(`repo-pulse: ${msg}\n`)
+  process.stderr.write(`aimux-pulse: ${msg}\n`)
   process.exit(code)
 }
 
@@ -155,7 +157,10 @@ async function openInCmux(url: string, cmuxBin: string, focus: boolean): Promise
     await execFileAsync(cmuxBin, args, { timeout: 5000 })
     return true
   } catch (err) {
-    console.error('repo-pulse: cmux could not open a tab', err instanceof Error ? err.message : err)
+    console.error(
+      'aimux-pulse: cmux could not open a tab',
+      err instanceof Error ? err.message : err,
+    )
     return false
   }
 }
@@ -165,7 +170,7 @@ async function openUrl(url: string, cmuxBin: string | null, focus: boolean): Pro
   const opener =
     process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
   const child = spawn(opener, [url], { stdio: 'ignore', shell: process.platform === 'win32' })
-  child.on('error', (err) => console.error('repo-pulse: could not open browser', err.message))
+  child.on('error', (err) => console.error('aimux-pulse: could not open browser', err.message))
 }
 
 // --- commands ----------------------------------------------------------------------
@@ -175,7 +180,7 @@ const rel = (ts: number, now: number) => `${formatDuration(now - ts)} ago`
 async function ps(): Promise<void> {
   const list = await listInstances()
   if (!list.length) {
-    process.stdout.write('no repo-pulse instances running\n')
+    process.stdout.write('no aimux-pulse instances running\n')
     return
   }
   const now = Date.now()
@@ -210,7 +215,7 @@ async function ps(): Promise<void> {
 async function stopAll(): Promise<void> {
   const list = await listInstances()
   if (!list.length) {
-    process.stdout.write('no repo-pulse instances running\n')
+    process.stdout.write('no aimux-pulse instances running\n')
     return
   }
   for (const i of list) {
@@ -244,17 +249,17 @@ async function main(): Promise<void> {
 
   if (opts.command === 'stop') {
     const inst = await readInstance(instanceFile)
-    if (!inst) return fail(`no repo-pulse is running for ${repoName}`, 1)
+    if (!inst) return fail(`no aimux-pulse is running for ${repoName}`, 1)
     process.kill(inst.pid, 'SIGTERM')
     await rm(instanceFile, { force: true })
-    process.stdout.write(`stopped repo-pulse for ${repoName} (pid ${inst.pid})\n`)
+    process.stdout.write(`stopped aimux-pulse for ${repoName} (pid ${inst.pid})\n`)
     return
   }
 
   const running = await readInstance(instanceFile)
   if (running) {
     const url = `http://127.0.0.1:${running.port}/`
-    process.stdout.write(`repo-pulse is already running for ${repoName} at ${url}\n`)
+    process.stdout.write(`aimux-pulse is already running for ${repoName} at ${url}\n`)
     if (opts.open) await openUrl(url, cmuxBin, opts.focus)
     return
   }
@@ -264,6 +269,8 @@ async function main(): Promise<void> {
   const logPath = opts.persist ? path.join(stateDir, 'events.jsonl') : null
   const store = new EventStore(logPath)
   await store.load()
+  const repostat = new RepostatTracker(stateDir, { command: statsCommand() })
+  const fleet = new FleetUsageTracker(stateDir)
   let lastEventAt = 0
 
   const watcher = new RepoWatcher(root, {
@@ -276,13 +283,15 @@ async function main(): Promise<void> {
       }
     },
     onSnapshot: (snapshot) => {
+      repostat.invalidate(snapshot.wt.path)
       store.snapshots.set(snapshot.wt.id, snapshot)
       server.broadcast('snapshot', snapshot)
+      server.broadcast('repostat', { wt: snapshot.wt.id, stale: true })
       const sample = store.sample(snapshot)
       if (sample) server.broadcast('sample', sample, sample.id)
     },
     onWorktrees: (wts) => server.broadcast('worktrees', wts),
-    onError: (err) => console.error('repo-pulse:', err instanceof Error ? err.message : err),
+    onError: (err) => console.error('aimux-pulse:', err instanceof Error ? err.message : err),
   })
   const usage = await UsageTracker.create(
     root,
@@ -298,7 +307,9 @@ async function main(): Promise<void> {
     worktrees: () => watcher.worktrees(),
     idleMs: opts.idleMs,
     lastEventAt: () => lastEventAt,
+    repostat,
     usage,
+    fleet,
   })
 
   await watcher.start()
@@ -309,7 +320,7 @@ async function main(): Promise<void> {
   await writeFile(instanceFile, JSON.stringify(inst))
 
   const wts = watcher.worktrees()
-  process.stdout.write(`repo-pulse  ${repoName}  ${url}\n`)
+  process.stdout.write(`aimux-pulse  ${repoName}  ${url}\n`)
   process.stdout.write(
     `watching ${wts.length} worktree${wts.length === 1 ? '' : 's'}: ${wts.map((w) => w.branch ?? w.head?.slice(0, 7) ?? '?').join(', ')}\n`,
   )
@@ -325,9 +336,11 @@ async function main(): Promise<void> {
   const shutdown = (why: string): void => {
     if (stopping) return
     stopping = true
-    process.stdout.write(`repo-pulse: stopping (${why})\n`)
+    process.stdout.write(`aimux-pulse: stopping (${why})\n`)
     watcher.stop()
     usage.stop()
+    repostat.stop()
+    fleet.stop()
     server.close()
     Promise.allSettled([store.flush(), rm(instanceFile, { force: true })]).finally(() =>
       process.exit(0),
@@ -399,13 +412,15 @@ async function detach(
     const inst = await readInstance(instanceFile)
     if (inst && inst.pid === child.pid) {
       const url = `http://127.0.0.1:${inst.port}/`
-      process.stdout.write(`repo-pulse running in the background (pid ${inst.pid}) at ${url}\n`)
+      process.stdout.write(`aimux-pulse running in the background (pid ${inst.pid}) at ${url}\n`)
       process.stdout.write(
         opts.idleMs
           ? `stops on its own after ${formatDuration(opts.idleMs)} with no viewer and no activity; `
           : 'runs until stopped; ',
       )
-      process.stdout.write(`repo-pulse --stop ends it, repo-pulse ps lists all\nlog: ${logFile}\n`)
+      process.stdout.write(
+        `aimux-pulse --stop ends it, aimux-pulse ps lists all\nlog: ${logFile}\n`,
+      )
       if (opts.open) await openUrl(url, cmuxBin, opts.focus)
       return
     }
@@ -417,6 +432,6 @@ async function detach(
 }
 
 main().catch((err: unknown) => {
-  console.error('repo-pulse:', err instanceof Error ? err.message : err)
+  console.error('aimux-pulse:', err instanceof Error ? err.message : err)
   process.exit(1)
 })

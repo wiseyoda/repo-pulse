@@ -1,4 +1,7 @@
-# repo-pulse
+# Pulse
+
+The suite checkout is `pulse/` (formerly `repo-pulse/`). The public command and package are
+`aimux-pulse`; existing `~/.repo-pulse` data paths remain unchanged. Health uses Stats.
 
 **See what is happening to a git repo, as it happens.** Every write becomes a row with its
 size. Commits roll up by work item. Click anything for the diff. A stats view shows where the
@@ -14,7 +17,7 @@ any agent, no hooks or integration required.
 
 ```sh
 cd ~/dev/some-repo
-repo-pulse
+aimux-pulse
 ```
 
 That is the whole workflow. It starts in the background, opens the page, and gets out of the
@@ -24,7 +27,7 @@ command in; anywhere else it opens in your default browser.
 ## Why
 
 Watching an agent edit a repo through `git status` and a file browser tells you what is
-different now, not what is happening. repo-pulse answers the questions you actually have while
+different now, not what is happening. Pulse answers the questions you actually have while
 something is working on your code:
 
 - **Is it doing anything?** The feed ticks with every write, the size of each edit beside it.
@@ -49,27 +52,27 @@ sources directly.
 git clone https://github.com/wiseyoda/repo-pulse
 cd repo-pulse
 pnpm install
-ln -s "$PWD/bin/repo-pulse" ~/.local/bin/repo-pulse   # or anywhere on your PATH
+ln -s "$PWD/bin/aimux-pulse" ~/.local/bin/aimux-pulse   # or anywhere on your PATH
 ```
 
 ## Use
 
 ```sh
-repo-pulse                 # this repo: start in the background and open the page
-repo-pulse ~/dev/other     # a different repo
-repo-pulse ps              # every running instance, with viewers and when it stops
-repo-pulse --stop          # stop this repo's instance
-repo-pulse --stop-all      # stop them all
-repo-pulse -f              # run attached to the terminal instead (logs there, Ctrl-C stops it)
+aimux-pulse                 # this repo: start in the background and open the page
+aimux-pulse ~/dev/other     # a different repo
+aimux-pulse ps              # every running instance, with viewers and when it stops
+aimux-pulse --stop          # stop this repo's instance
+aimux-pulse --stop-all      # stop them all
+aimux-pulse -f              # run attached to the terminal instead (logs there, Ctrl-C stops it)
 ```
 
-Running `repo-pulse` again for a repo that already has a feed just opens that feed. A second
+Running `aimux-pulse` again for a repo that already has a feed just opens that feed. A second
 repo gets the next free port. Every worktree of a repo is watched by the one instance.
 
 **It cleans up after itself.** An instance stops on its own after two hours with no page
 connected and no activity in the repo. It never stops while you are looking at it, and it
 keeps going unwatched as long as edits or commits keep arriving. `--idle 6h` changes the
-budget; `--idle off` disables it. `repo-pulse ps` shows when each one will stop.
+budget; `--idle off` disables it. `aimux-pulse ps` shows when each one will stop.
 
 ### The page
 
@@ -105,10 +108,22 @@ log, so it works for any repo:
 - **Where the work is** by directory, **hot files**, **commits by type**, **tests vs source**,
   and the repo's **file mix**.
 
+### Repository health
+
+Open Health (`h`, or `/#health`) for a deterministic Stats snapshot of one worktree: source
+revision, files, complexity, documentation and risk hotspots. Snapshots are cached outside the
+repository; Refresh runs a new bounded scan. Missing or incompatible scanners leave the other
+views working and retain the last good snapshot with an error label.
+
+The scanner must support `aimux-stats extension <path>`. Set `AIMUX_STATS_BIN` to an explicit
+compatible binary when it is not first on PATH, for example the sibling checkout's
+`target/release/aimux-stats`.
+No scan writes into the watched repository or changes its activity/idle timer.
+
 ### LLM usage
 
 An opt-in view (`u`, or `/#usage`) of what the coding agents working in this repo cost. Enable
-it once per repo and repo-pulse reads the transcripts on this machine whose working directory
+it once per repo and Pulse reads the transcripts on this machine whose working directory
 is inside the repo: Claude Code (every `~/.claude*` config dir, subagents included), Codex
 (`~/.codex*` rollouts), Grok (`~/.grok` sessions), and Antigravity (per-conversation SQLite databases under `~/.gemini*/antigravity*`, decoded
 the way ccusage's adapter does, so models and tokens match it). Only usage and metadata fields are read (tokens, model,
@@ -127,6 +142,58 @@ timestamp, working directory, branch), never message content.
 - State lives under `~/.repo-usage/<repo>/`, named after the origin remote's repo name:
   `config.json` (enabled, roots, sources), `usage.jsonl`, `scan.json`. Disable from the view or
   by setting `enabled` to false.
+
+#### Fleet history (optional)
+
+The Usage view can show a second, clearly separated section: this repository's usage across the
+whole fleet, read from Usage's `accounts.repository-usage.v1` export. It is optional, needs
+no Engine, and nothing is requested, scanned or guessed until you write a config file.
+
+The export is authoritative whole-calendar-day aggregates with **no shared event IDs**, so the
+two sections are never added together and never deduplicated: local usage is this machine's
+transcripts over the page's window, fleet history is every host over the export's own interval.
+The export has no branch or worktree dimension, so its totals cover the whole repository.
+
+Publish the export on the hub, mapping the repository to a stable ID:
+
+```sh
+# mappings.json: {"repositories":[{"hostId":"mini-work","root":"/Users/me/dev/thing","repositoryId":"repo:thing"}]}
+aimux-usage export --repository-usage --days 120 \
+  --repository-mappings mappings.json --out hub/data/repository-usage.json
+```
+
+`hub/serve.py` already allowlists `/repository-usage.json`, so the file is served read-only next
+to the dashboard. Then configure the consumer in this repo's state dir — `~/.repo-pulse/<repo>-<id>/fleet-usage.json`,
+keyed by the main worktree, the same dir as the event log (the path is shown in the view):
+
+```json
+{
+  "source": { "url": "http://100.71.1.121:8787/repository-usage.json" },
+  "repositoryId": "repo:thing",
+  "hostIds": ["mini-work", "mbp-work"],
+  "fleetHistoryUrl": "http://100.71.1.121:8787/"
+}
+```
+
+- `source` takes exactly one of `url` (http(s), no embedded credentials or query parameters) or `path` (an absolute
+  path to a JSON file, for offline use — copy or rsync the export). Reads are bounded in time and
+  size, follow no redirects, and send no credentials; an upstream error is reported as a status
+  code, never as a body.
+- `repositoryId` must be the **same stable ID** you put in the producer mappings. Nothing is
+  inferred from the directory basename, the git remote name or `.worktrees` names, so rows the
+  producer did not map stay unassociated and are only counted, never attributed to this repo.
+- `hostIds` is optional explicit host scoping. `fleetHistoryUrl` is an optional link to the fleet
+  dashboard and must also be plain http(s).
+- Refresh is request-driven from the view and coalesced: there is no background polling and no new
+  dependency. The last good export is cached next to the other state (never in the watched repo),
+  so a missing, invalid or stale source shows an explicit unavailable/stale state while local
+  usage, activity, diffs and health keep working.
+  Refresh also rereads configuration; changing sources never relabels the previous source's cache.
+  Freshness includes the export's generated/as-of timestamps, not just when it was downloaded.
+- The view labels the matched repository ID, the export interval, timezone, as-of time and each
+  host's last successful collection, plus repository-identity and time-allocation confidence.
+  Values are API-equivalent only: the export leaves configured subscription price unallocated and
+  actual billed cash unevidenced, and neither is ever shown as money paid.
 
 ### Markdown
 
@@ -150,7 +217,7 @@ agent it is watching. The server binds `127.0.0.1`, refuses non-loopback `Host` 
 cross-origin POSTs, and only serves diffs for paths git already reported.
 
 Edits, HEAD moves, and uncommitted-work samples are persisted to an append-only log, so a
-restart keeps the night's history. Commits are re-read from git. Edits made while repo-pulse
+restart keeps the night's history. Commits are re-read from git. Edits made while Pulse
 was not running are invisible by nature, which is why starting it before a long run matters.
 
 ## Options
